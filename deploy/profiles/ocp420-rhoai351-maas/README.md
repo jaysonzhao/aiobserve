@@ -2,7 +2,9 @@
 
 This profile deploys the MCP server and Console plugin into `ai-observability`, using the existing MaaS `gpt-oss-20b` model. The live cluster was confirmed as OpenShift 4.20.39 and OpenShift AI 3.5.1. The MaaSModelRef in `llm` reported `Ready=True`, a healthy runtime, and the alias `publishers/llm/models/gpt-oss-20b`.
 
-The MaaS gateway publishes an HTTPS endpoint. Its TLS certificate validated from the deployment workstation, and an unauthenticated request to the model's `/v1/models` path returned HTTP 401. The exact served API model ID and inference/tool behavior remain pending an API key. The model profile is already seeded with `requiresApiKey: true`; no key or placeholder Secret is included here.
+The MaaS gateway publishes an HTTPS endpoint, and its certificate validated from the deployment workstation. The API key was configured in the namespace-scoped `ai-maas-credentials` Secret and is not stored in this repository. In the 2026-10-21 deployment, GPT-OSS inference, metrics-backed summaries, and report export worked. Generic MCP function calling did not return tool calls and remains unresolved; no MaaS serving-side configuration was changed. The profile keeps `requiresApiKey: true` and references the Secret field without including its value.
+
+For the detailed compatibility audit, deployment workflow, security boundaries, and acceptance checks, see the [deployment skill](../../../skills/deploy-aiobs-ocp420-rhoai35/SKILL.md).
 
 The profile enables cluster metrics through Thanos and disables the chart's optional Grafana, Loki, and Korrel8r permissions. Logs, traces, and correlation remain disabled until their existing gateways and tenant authorization are identified. The MCP Route is disabled. The NetworkPolicy allows ingress to the MCP pod from the `openshift-console` namespace. The Console proxy uses the chart's shared service identity, so limit use to an administrator pilot until per-user authorization is implemented.
 
@@ -76,8 +78,8 @@ oc get console.operator.openshift.io cluster -o jsonpath='{.spec.plugins}{"\\n"}
 
 User workload monitoring is already enabled on the target cluster, and the model namespace has existing ServiceMonitor/PodMonitor resources. The profile does not change shared monitoring configuration.
 
-## Add the API key later
+## MaaS credential management and acceptance
 
-Use **AI Observability → Settings** to add the MaaS key for `gpt-oss-20b`. The server stores it in the namespace-scoped `ai-maas-credentials` Secret under the `gpt-oss-20b` key. If using a CLI, read the key without echo and pass it directly to a Kubernetes Secret creation/patch command; never put it in a values file, shell history, or Git. The HTTPS endpoint is configured so the key travels over TLS.
+The live deployment stores the MaaS key in the namespace-scoped `ai-maas-credentials` Secret under the `gpt-oss-20b` field. For a new installation or key rotation, use **AI Observability → Settings** or a secure CLI flow; never put the value in a values file, shell history, or Git. The configured HTTPS endpoint preserves TLS verification.
 
-After adding the key, verify `/v1/models`, a chat completion, tool calling, a summary, and report export. Until those checks pass, treat AI inference features as pending. Confirm the actual served model ID from `/v1/models`; update both `modelName` and the selected UI model if it differs from `gpt-oss-20b`.
+The current validation record is limited: inference, metrics-backed summary, and report export worked; generic MCP function calling did not return tool calls. Confirm the served ID using `/v1/models`, then validate completion, function calling, summary, and export separately after any runtime or application change.

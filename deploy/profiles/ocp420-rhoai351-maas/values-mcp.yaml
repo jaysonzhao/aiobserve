@@ -40,7 +40,7 @@ modelConfig:
       output_rate: 0.0
     _metadata:
       source: user
-      description: GPT-OSS-20B MaaS profile; API key pending
+      description: GPT-OSS-20B MaaS profile; credential managed separately in a Kubernetes Secret
 
 rbac:
   createGrafanaRole: false
