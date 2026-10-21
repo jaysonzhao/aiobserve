@@ -1,0 +1,2415 @@
+diff --git a/deploy/helm/mcp-server/templates/configmap-ca.yaml b/deploy/helm/mcp-server/templates/configmap-ca.yaml
+index 2f3c946..0db838b 100644
+--- a/deploy/helm/mcp-server/templates/configmap-ca.yaml
++++ b/deploy/helm/mcp-server/templates/configmap-ca.yaml
+@@ -1,8 +1,8 @@
++{{- if ne .Values.trustedCA.create false }}
+ apiVersion: v1
+ kind: ConfigMap
+ metadata:
+   name: {{ .Values.trustedCA.configMapName | default "aiobs-mcp-server-trusted-ca-bundle" }}
+   annotations:
+     service.beta.openshift.io/inject-cabundle: "true"
+-
+-
++{{- end }}
+diff --git a/deploy/helm/mcp-server/templates/crb.yaml b/deploy/helm/mcp-server/templates/crb.yaml
+index f3746be..3e145b9 100644
+--- a/deploy/helm/mcp-server/templates/crb.yaml
++++ b/deploy/helm/mcp-server/templates/crb.yaml
+@@ -1,4 +1,3 @@
+----
+ apiVersion: rbac.authorization.k8s.io/v1
+ kind: ClusterRoleBinding
+ metadata:
+@@ -24,111 +23,3 @@ subjects:
+   - kind: ServiceAccount
+     name: mcp-analyzer
+     namespace: {{ .Release.Namespace }}
+----
+-{{- if .Values.rbac.bindOpenshiftClusterMonitoringView }}
+-apiVersion: rbac.authorization.k8s.io/v1
+-kind: ClusterRoleBinding
+-metadata:
+-  name: openshift-cluster-monitoring-view-thanos-{{ .Release.Namespace }}-mcp
+-roleRef:
+-  apiGroup: rbac.authorization.k8s.io
+-  kind: ClusterRole
+-  name: openshift-cluster-monitoring-view
+-subjects:
+-  - kind: ServiceAccount
+-    name: mcp-analyzer
+-    namespace: {{ .Release.Namespace }}
+-{{- end }}
+----
+-{{- if .Values.rbac.createGrafanaRole }}
+-apiVersion: rbac.authorization.k8s.io/v1
+-kind: ClusterRole
+-metadata:
+-  name: grafana-prometheus-reader
+-rules:
+-- apiGroups: ["*"]
+-  resources:
+-    - "prometheuses"
+-    - "prometheuses/*"
+-    - "alertmanagers"
+-    - "alertmanagers/*"
+-  verbs:
+-    - "get"
+-    - "list"
+-    - "watch"
+-- apiGroups: ["monitoring.coreos.com"]
+-  resources:
+-    - "prometheuses/api"
+-    - "alertmanagers/api"
+-  verbs:
+-    - "get"
+-    - "create"
+-    - "update"
+-{{- end }}
+----
+-apiVersion: rbac.authorization.k8s.io/v1
+-kind: ClusterRoleBinding
+-metadata:
+-  name: grafana-prometheus-reader-binding-{{ .Release.Namespace }}-mcp
+-roleRef:
+-  apiGroup: rbac.authorization.k8s.io
+-  kind: ClusterRole
+-  name: grafana-prometheus-reader
+-subjects:
+-  - kind: ServiceAccount
+-    name: mcp-analyzer
+-    namespace: {{ .Release.Namespace }}
+----
+-apiVersion: rbac.authorization.k8s.io/v1
+-kind: ClusterRoleBinding
+-metadata:
+-  name: korrel8r-view-binding-{{ .Release.Namespace }}-mcp
+-subjects:
+-- kind: ServiceAccount
+-  name: mcp-analyzer
+-  namespace: {{ .Release.Namespace }}
+-roleRef:
+-  kind: ClusterRole
+-  name: korrel8r-view
+-  apiGroup: rbac.authorization.k8s.io
+----
+-# Bind to Loki tenant logs ClusterRole for multi-tenant access
+-apiVersion: rbac.authorization.k8s.io/v1
+-kind: ClusterRoleBinding
+-metadata:
+-  name: loki-tenant-logs-binding-{{ .Release.Namespace }}-mcp
+-subjects:
+-- kind: ServiceAccount
+-  name: mcp-analyzer
+-  namespace: {{ .Release.Namespace }}
+-roleRef:
+-  kind: ClusterRole
+-  name: {{ .Values.global.lokiNamespace | default "openshift-logging" }}-{{- if eq .Values.rbac.lokiReleaseName "" }}{{ .Release.Name }}-loki{{- else }}{{ .Values.rbac.lokiReleaseName }}{{- end }}-tenant-logs
+-  apiGroup: rbac.authorization.k8s.io
+----
+-# ClusterRole for discovering InferenceServices (runtime model discovery)
+-apiVersion: rbac.authorization.k8s.io/v1
+-kind: ClusterRole
+-metadata:
+-  name: inferenceservice-viewer-{{ .Release.Namespace }}-mcp
+-  labels:
+-    app.kubernetes.io/name: mcp-server
+-    app.kubernetes.io/component: rbac
+-rules:
+-- apiGroups: ["serving.kserve.io"]
+-  resources: ["inferenceservices"]
+-  verbs: ["get", "list", "watch"]
+----
+-apiVersion: rbac.authorization.k8s.io/v1
+-kind: ClusterRoleBinding
+-metadata:
+-  name: inferenceservice-viewer-binding-{{ .Release.Namespace }}-mcp
+-subjects:
+-- kind: ServiceAccount
+-  name: mcp-analyzer
+-  namespace: {{ .Release.Namespace }}
+-roleRef:
+-  kind: ClusterRole
+-  name: inferenceservice-viewer-{{ .Release.Namespace }}-mcp
+-  apiGroup: rbac.authorization.k8s.io
+-
+diff --git a/deploy/helm/mcp-server/templates/deployment.yaml b/deploy/helm/mcp-server/templates/deployment.yaml
+index a5863d8..08a53fd 100644
+--- a/deploy/helm/mcp-server/templates/deployment.yaml
++++ b/deploy/helm/mcp-server/templates/deployment.yaml
+@@ -19,26 +19,36 @@ spec:
+     spec:
+       serviceAccountName: mcp-analyzer
+       restartPolicy: Always
++      securityContext:
++        runAsNonRoot: true
++        seccompProfile:
++          type: RuntimeDefault
+       containers:
+         - name: mcp-server
+-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
++          securityContext:
++            allowPrivilegeEscalation: false
++            capabilities:
++              drop: [ALL]
++          image: "{{ .Values.image.repository }}{{ if .Values.image.digest }}@{{ .Values.image.digest }}{{ else }}:{{ .Values.image.tag }}{{ end }}"
+           imagePullPolicy: {{ .Values.image.pullPolicy }}
+           ports:
+             - containerPort: {{ .Values.service.port }}
+               protocol: TCP
++          {{- if and .Values.llamaStackConfig .Values.llamaStackConfig.enabled }}
+           envFrom:
+-            # Default URL (llamastack.*): created by this chart for standalone deployments.
+-            # Listed first so the umbrella-chart ConfigMap below can override it.
+             - configMapRef:
+                 name: {{ .Release.Name }}-llamastack-config-default
+                 optional: true
+-            # Umbrella-chart (aiobs-stack) ConfigMap: computes the correct service name
+-            # (llamastack vs llamastack-service) from rag.llama-stack.managedByOperator.
+-            # Listed last so it wins over the default when both exist.
+             - configMapRef:
+                 name: {{ .Release.Name }}-llamastack-config
+                 optional: true
++          {{- end }}
+           env:
++            - name: MAAS_API_URL
++              value: {{ .Values.env.MAAS_API_URL | quote }}
++            {{- with .Values.extraEnv }}
++            {{- toYaml . | nindent 12 }}
++            {{- end }}
+             - name: MCP_HOST
+               value: "{{ .Values.env.MCP_HOST }}"
+             - name: MCP_PORT
+@@ -65,22 +75,8 @@ spec:
+               value: "{{ .Values.env.MAX_TIME_RANGE_DAYS }}"
+             - name: DEFAULT_TIME_RANGE_DAYS
+               value: "{{ .Values.env.DEFAULT_TIME_RANGE_DAYS }}"
+-            - name: TEMPO_URL
+-              value: "{{ .Values.env.TEMPO_URL }}"
+-            - name: TEMPO_TENANT_ID
+-              value: "{{ .Values.env.TEMPO_TENANT_ID }}"
+-            - name: KORREL8R_URL
+-              value: "{{ .Values.env.KORREL8R_URL }}"
+-            - name: KORREL8R_TIMEOUT_SECONDS
+-              value: "{{ .Values.env.KORREL8R_TIMEOUT_SECONDS }}"
+             - name: LLM_TIMEOUT_SECONDS
+               value: "{{ .Values.env.LLM_TIMEOUT_SECONDS }}"
+-            - name: MAX_NUM_LOG_ROWS
+-              value: "{{ .Values.env.MAX_NUM_LOG_ROWS }}"
+-            - name: MAX_NUM_TRACE_SPANS
+-              value: "{{ .Values.env.MAX_NUM_TRACE_SPANS }}"
+-            - name: TRACE_FETCH_SAFETY_FACTOR
+-              value: "{{ .Values.env.TRACE_FETCH_SAFETY_FACTOR }}"
+             - name: NAMESPACE
+               value: "{{ .Release.Namespace }}"
+             - name: THANOS_TOKEN
+@@ -89,25 +85,13 @@ spec:
+                   name: mcp-analyzer
+                   key: token
+             - name: LLM_URL
+-              value: "http://{{ .Values.LLM_PREDICTOR }}.{{ .Release.Namespace }}.svc.cluster.local:8080/v1"
++              value: {{ .Values.llm.url | default "" | quote }}
+             - name: LLM_API_TOKEN
+               value: "{{ .Values.llm.apiToken }}"
+             {{- if .Values.llm.url }}
+             - name: LLAMA_STACK_URL
+               value: "{{ .Values.llm.url }}"
+             {{- end }}
+-            {{- if .Values.env.GPU_METRICS_PREFIX_NVIDIA }}
+-            - name: GPU_METRICS_PREFIX_NVIDIA
+-              value: "{{ .Values.env.GPU_METRICS_PREFIX_NVIDIA }}"
+-            {{- end }}
+-            {{- if .Values.env.GPU_METRICS_PREFIX_INTEL }}
+-            - name: GPU_METRICS_PREFIX_INTEL
+-              value: "{{ .Values.env.GPU_METRICS_PREFIX_INTEL }}"
+-            {{- end }}
+-            {{- if .Values.env.GPU_METRICS_PREFIX_AMD }}
+-            - name: GPU_METRICS_PREFIX_AMD
+-              value: "{{ .Values.env.GPU_METRICS_PREFIX_AMD }}"
+-            {{- end }}
+             - name: MODEL_CONFIG
+               {{- if .Values.modelConfig }}
+               value: '{{ .Values.modelConfig | toJson }}'
+diff --git a/deploy/helm/mcp-server/templates/llamastack-config.yaml b/deploy/helm/mcp-server/templates/llamastack-config.yaml
+index bbb5a7d..bcae5e5 100644
+--- a/deploy/helm/mcp-server/templates/llamastack-config.yaml
++++ b/deploy/helm/mcp-server/templates/llamastack-config.yaml
+@@ -1,6 +1,8 @@
++{{- if and .Values.llamaStackConfig .Values.llamaStackConfig.enabled }}
+ apiVersion: v1
+ kind: ConfigMap
+ metadata:
+   name: {{ .Release.Name }}-llamastack-config-default
+ data:
+   LLAMA_STACK_URL: "http://llamastack.{{ .Release.Namespace }}.svc.cluster.local:8321/v1"
++{{- end }}
+diff --git a/deploy/helm/mcp-server/values.yaml b/deploy/helm/mcp-server/values.yaml
+index f000d3f..f3ebe7e 100644
+--- a/deploy/helm/mcp-server/values.yaml
++++ b/deploy/helm/mcp-server/values.yaml
+@@ -10,6 +10,8 @@ deployment:
+ image:
+   repository: quay.io/ecosystem-appeng/aiobs-mcp-server
+   tag: v3.2.0
++  # Optional immutable image digest; when set, deployment uses repository@digest.
++  digest: ""
+   pullPolicy: IfNotPresent
+ 
+ service:
+@@ -87,11 +89,18 @@ llm:
+ trustedCA:
+   enabled: true
+   configMapName: "aiobs-mcp-server-trusted-ca-bundle"  # Fixed name
++  create: true
++
++# Additional environment entries for site-specific client trust settings.
++extraEnv: []
+ 
+ # RBAC setup similar to metrics-api
+ rbac:
+   # Creates a ClusterRole with access to Prometheus and Alertmanager APIs
+   createGrafanaRole: true
++  # Optional bindings for telemetry components that are not installed in every profile.
++  bindKorrel8rView: true
++  bindLokiTenantLogs: true
+   # Bind to openshift-cluster-monitoring-view if it exists (some clusters may not have it)
+   bindOpenshiftClusterMonitoringView: false
+   # Loki release name for ClusterRole binding
+diff --git a/deploy/helm/openshift-console-plugin/templates/deployment.yaml b/deploy/helm/openshift-console-plugin/templates/deployment.yaml
+index 982e13c..5618549 100644
+--- a/deploy/helm/openshift-console-plugin/templates/deployment.yaml
++++ b/deploy/helm/openshift-console-plugin/templates/deployment.yaml
+@@ -22,7 +22,7 @@ spec:
+       {{- end }}
+       containers:
+         - name: {{ template "openshift-console-plugin.name" . }}
+-          image: "{{ .Values.plugin.image.repository }}:{{ .Values.plugin.image.tag }}"
++          image: "{{ .Values.plugin.image.repository }}{{ if .Values.plugin.image.digest }}@{{ .Values.plugin.image.digest }}{{ else }}:{{ .Values.plugin.image.tag }}{{ end }}"
+           ports:
+             - containerPort: {{ .Values.plugin.port }}
+               protocol: TCP
+diff --git a/deploy/helm/openshift-console-plugin/values.yaml b/deploy/helm/openshift-console-plugin/values.yaml
+index e4f5048..c4943aa 100644
+--- a/deploy/helm/openshift-console-plugin/values.yaml
++++ b/deploy/helm/openshift-console-plugin/values.yaml
+@@ -6,6 +6,8 @@ plugin:
+   image:
+     repository: quay.io/ecosystem-appeng/aiobs-console-plugin
+     tag: 3.2.0
++    # Optional immutable image digest; when set, deployment uses repository@digest.
++    digest: ""
+   imagePullPolicy: Always
+   imagePullSecrets: []
+   replicas: 1
+diff --git a/openshift-plugin/__tests__/pages/OpenShiftOnlyDashboard.test.tsx b/openshift-plugin/__tests__/pages/OpenShiftOnlyDashboard.test.tsx
+new file mode 100644
+index 0000000..719b1dc
+--- /dev/null
++++ b/openshift-plugin/__tests__/pages/OpenShiftOnlyDashboard.test.tsx
+@@ -0,0 +1,33 @@
++import * as React from 'react';
++import '@testing-library/jest-dom';
++import { fireEvent, render, screen } from '@testing-library/react';
++import AIObservabilityPage from '../../src/core/pages/AIObservabilityPage';
++import * as fs from 'fs';
++import * as path from 'path';
++
++jest.mock('../../src/core/pages/OpenShiftMetricsPage', () => () => <div data-testid="openshift-metrics">Cluster metrics view</div>);
++jest.mock('../../src/core/pages/AIChatPage', () => () => <div data-testid="openshift-chat">OpenShift scoped chat</div>);
++jest.mock('../../src/core/components/SettingsModal', () => ({ SettingsModal: ({ isOpen }: { isOpen: boolean }) => isOpen ? <div data-testid="maas-settings">MaaS settings</div> : null }));
++jest.mock('../../src/core/services/runtimeConfig', () => ({ initializeRuntimeConfig: jest.fn().mockResolvedValue(undefined) }));
++jest.mock('../../src/core/services/mcpClient', () => ({ getSessionConfig: () => ({ ai_model: 'maas/gpt-oss-20b' }) }));
++
++describe('standalone OpenShift dashboard', () => {
++  it('shows only OpenShift metrics and chat, and allows MaaS settings', () => {
++    render(<AIObservabilityPage />);
++    expect(screen.getByRole('tab', { name: 'OpenShift Metrics' })).toBeInTheDocument();
++    expect(screen.getByRole('tab', { name: 'Chat' })).toBeInTheDocument();
++    expect(screen.queryByText(/vLLM|Accelerator|GPU/i)).not.toBeInTheDocument();
++    expect(screen.getByTestId('openshift-metrics')).toBeInTheDocument();
++
++    fireEvent.click(screen.getByRole('tab', { name: 'Chat' }));
++    expect(screen.getByTestId('openshift-chat')).toBeInTheDocument();
++    fireEvent.click(screen.getByRole('button', { name: /Settings/ }));
++    expect(screen.getByTestId('maas-settings')).toBeInTheDocument();
++  });
++
++  it('does not register a vLLM console route', () => {
++    const serialized = fs.readFileSync(path.resolve(__dirname, '../../console-extensions.json'), 'utf8');
++    expect(serialized).not.toMatch(/vllm|VLLMMetricsPage/i);
++    expect(serialized).toContain('AIObservabilityPage');
++  });
++});
+diff --git a/openshift-plugin/console-extensions.json b/openshift-plugin/console-extensions.json
+index 0986483..aedabb2 100644
+--- a/openshift-plugin/console-extensions.json
++++ b/openshift-plugin/console-extensions.json
+@@ -19,16 +19,6 @@
+       "exact": true
+     }
+   },
+-  {
+-    "type": "console.page/route",
+-    "properties": {
+-      "path": "/observe/ai-observability/vllm",
+-      "component": {
+-        "$codeRef": "VLLMMetricsPage"
+-      },
+-      "exact": true
+-    }
+-  },
+   {
+     "type": "console.page/route",
+     "properties": {
+diff --git a/openshift-plugin/package.json b/openshift-plugin/package.json
+index deb62b7..f1d4b73 100644
+--- a/openshift-plugin/package.json
++++ b/openshift-plugin/package.json
+@@ -1,7 +1,7 @@
+ {
+   "name": "openshift-ai-observability-plugin",
+   "version": "1.0.0",
+-  "description": "OpenShift Console Dynamic Plugin for AI Observability",
++  "description": "OpenShift Console plugin for standalone cluster observability",
+   "private": true,
+   "license": "Apache-2.0",
+   "engines": {
+@@ -87,10 +87,9 @@
+     "name": "aiobs-console-plugin",
+     "version": "1.0.0",
+     "displayName": "AI Observability",
+-    "description": "Monitor and analyze AI/ML workloads with OpenShift AI Observability",
++    "description": "Monitor and analyze OpenShift cluster metrics",
+     "exposedModules": {
+       "AIObservabilityPage": "./core/pages/AIObservabilityPage",
+-      "VLLMMetricsPage": "./core/pages/VLLMMetricsPage",
+       "OpenShiftMetricsPage": "./core/pages/OpenShiftMetricsPage",
+       "AIChatPage": "./core/pages/AIChatPage"
+     },
+diff --git a/openshift-plugin/src/core/components/AIModelSettings/tabs/MetricsSettingsTab.tsx b/openshift-plugin/src/core/components/AIModelSettings/tabs/MetricsSettingsTab.tsx
+index 26d7696..44a91b8 100644
+--- a/openshift-plugin/src/core/components/AIModelSettings/tabs/MetricsSettingsTab.tsx
++++ b/openshift-plugin/src/core/components/AIModelSettings/tabs/MetricsSettingsTab.tsx
+@@ -1,113 +1,23 @@
+ import * as React from 'react';
+-import {
+-  Button,
+-  Flex,
+-  FlexItem,
+-  Tab,
+-  Tabs,
+-  TabTitleText,
+-  Text,
+-  TextContent,
+-  TextVariants,
+-  Tooltip,
+-} from '@patternfly/react-core';
++import { Button, Flex, FlexItem, Text, TextContent, TextVariants, Tooltip } from '@patternfly/react-core';
+ import { DownloadIcon } from '@patternfly/react-icons';
+ import { MetricsCatalogTab } from './MetricsCatalogTab';
+-import { VLLMMetricsSettingsTab } from './VLLMMetricsSettingsTab';
+ import { OpenShiftMetricsSettingsTab } from './OpenShiftMetricsSettingsTab';
+-
+-type MetricsSubtab = 'catalog' | 'vllm' | 'openshift';
+-
+ export const MetricsSettingsTab: React.FC = () => {
+-  const [activeSubtab, setActiveSubtab] = React.useState<MetricsSubtab>('catalog');
+-
+   const catalogDownloadRef = React.useRef<(() => void) | null>(null);
+-  const vllmDownloadRef = React.useRef<(() => void) | null>(null);
+   const openshiftDownloadRef = React.useRef<(() => void) | null>(null);
+-
+-  const handleSubtabSelect = (_event: React.MouseEvent<HTMLElement, MouseEvent>, tabIndex: string | number) => {
+-    setActiveSubtab(tabIndex as MetricsSubtab);
+-  };
+-
+-  const subtabLabels: Record<MetricsSubtab, string> = {
+-    catalog: 'Chat Metrics Catalog',
+-    vllm: 'vLLM Metrics',
+-    openshift: 'OpenShift Metrics',
+-  };
+-
+-  const handleDownload = () => {
+-    switch (activeSubtab) {
+-      case 'catalog':
+-        catalogDownloadRef.current?.();
+-        break;
+-      case 'vllm':
+-        vllmDownloadRef.current?.();
+-        break;
+-      case 'openshift':
+-        openshiftDownloadRef.current?.();
+-        break;
+-    }
+-  };
+-
+-  return (
+-    <div style={{ marginTop: '16px' }}>
+-      <Flex justifyContent={{ default: 'justifyContentSpaceBetween' }} alignItems={{ default: 'alignItemsCenter' }} style={{ marginBottom: '16px' }}>
+-        <FlexItem>
+-          <TextContent>
+-            <Text component={TextVariants.h4}>Metrics</Text>
+-            <Text component={TextVariants.small} style={{ color: 'var(--pf-v5-global--Color--200)' }}>
+-              Browse and download metrics for Chat, vLLM, and OpenShift.
+-            </Text>
+-          </TextContent>
+-        </FlexItem>
+-        <FlexItem>
+-          <Tooltip content={`Download ${subtabLabels[activeSubtab]} as markdown`}>
+-            <Button
+-              variant="secondary"
+-              icon={<DownloadIcon />}
+-              onClick={handleDownload}
+-              aria-label={`Download ${subtabLabels[activeSubtab]} as markdown`}
+-            >
+-              Download
+-            </Button>
+-          </Tooltip>
+-        </FlexItem>
+-      </Flex>
+-
+-      <Tabs
+-        activeKey={activeSubtab}
+-        onSelect={handleSubtabSelect}
+-        aria-label="Metrics subtabs"
+-        isBox
+-      >
+-        <Tab
+-          eventKey="catalog"
+-          title={<TabTitleText>Chat Metrics Catalog</TabTitleText>}
+-          aria-label="Chat Metrics Catalog"
+-        >
+-          {activeSubtab === 'catalog' && (
+-            <MetricsCatalogTab downloadRef={catalogDownloadRef} hideHeader />
+-          )}
+-        </Tab>
+-        <Tab
+-          eventKey="vllm"
+-          title={<TabTitleText>vLLM Metrics</TabTitleText>}
+-          aria-label="vLLM Metrics"
+-        >
+-          {activeSubtab === 'vllm' && (
+-            <VLLMMetricsSettingsTab downloadRef={vllmDownloadRef} hideHeader />
+-          )}
+-        </Tab>
+-        <Tab
+-          eventKey="openshift"
+-          title={<TabTitleText>OpenShift Metrics</TabTitleText>}
+-          aria-label="OpenShift Metrics"
+-        >
+-          {activeSubtab === 'openshift' && (
+-            <OpenShiftMetricsSettingsTab downloadRef={openshiftDownloadRef} hideHeader />
+-          )}
+-        </Tab>
+-      </Tabs>
++  const [active, setActive] = React.useState<'catalog' | 'openshift'>('catalog');
++  const download = () => (active === 'catalog' ? catalogDownloadRef.current : openshiftDownloadRef.current)?.();
++  return <div style={{ marginTop: '16px' }}>
++    <Flex justifyContent={{ default: 'justifyContentSpaceBetween' }} alignItems={{ default: 'alignItemsCenter' }} style={{ marginBottom: '16px' }}>
++      <FlexItem><TextContent><Text component={TextVariants.h4}>Metrics</Text><Text component={TextVariants.small}>Browse and download supported OpenShift metrics.</Text></TextContent></FlexItem>
++      <FlexItem><Tooltip content="Download metrics as markdown"><Button variant="secondary" icon={<DownloadIcon />} onClick={download} aria-label="Download metrics as markdown">Download</Button></Tooltip></FlexItem>
++    </Flex>
++    <div role="tablist" aria-label="Metrics subtabs" style={{ display: 'flex', gap: '16px', borderBottom: '1px solid #d2d2d2', marginBottom: '12px' }}>
++      <button role="tab" aria-selected={active === 'catalog'} onClick={() => setActive('catalog')}>Chat Metrics Catalog</button>
++      <button role="tab" aria-selected={active === 'openshift'} onClick={() => setActive('openshift')}>OpenShift Metrics</button>
+     </div>
+-  );
++    {active === 'catalog' && <MetricsCatalogTab downloadRef={catalogDownloadRef} hideHeader />}
++    {active === 'openshift' && <OpenShiftMetricsSettingsTab downloadRef={openshiftDownloadRef} hideHeader />}
++  </div>;
+ };
+diff --git a/openshift-plugin/src/core/components/MetricsChatPanel.tsx b/openshift-plugin/src/core/components/MetricsChatPanel.tsx
+index 89fa9b6..cafa6ae 100644
+--- a/openshift-plugin/src/core/components/MetricsChatPanel.tsx
++++ b/openshift-plugin/src/core/components/MetricsChatPanel.tsx
+@@ -12,18 +12,16 @@ import {
+ } from '@patternfly/react-core';
+ import { RobotIcon, TimesIcon, PaperPlaneIcon, UserIcon } from '@patternfly/react-icons';
+ import ReactMarkdown from 'react-markdown';
+-import { getSessionConfig, chatOpenShift, chatVLLM } from '../services/mcpClient';
++import { getSessionConfig, chatOpenShift } from '../services/mcpClient';
+ import { ConfigurationRequiredAlert } from './ConfigurationRequiredAlert';
+ 
+ interface MetricsChatPanelProps {
+-  pageType?: 'openshift' | 'vllm';
+   scope: 'cluster_wide' | 'namespace_scoped' | string;
+   namespace?: string;
+   category: string;
+   timeRange: string;
+   isOpen: boolean;
+   onClose: () => void;
+-  modelName?: string; // For vLLM - the full model name (namespace | model)
+ }
+ 
+ interface ChatMessage {
+@@ -60,12 +58,6 @@ const CATEGORY_QUESTIONS: Record<string, string[]> = {
+     "What's causing high CPU or memory usage?",
+     "Are there any unhealthy nodes?"
+   ],
+-  'GPU & Accelerators': [
+-    "How is my GPU utilization across the cluster?",
+-    "Are any GPUs running too hot?",
+-    "What's my GPU power consumption looking like?",
+-    "Are there any GPU performance issues?"
+-  ],
+   'Autoscaling & Scheduling': [
+     "How is pod scheduling performing?",
+     "Are there any scheduling bottlenecks?",
+@@ -102,61 +94,6 @@ const CATEGORY_QUESTIONS: Record<string, string[]> = {
+     "Are there any performance anomalies?",
+     "How is traffic distribution across my services?"
+   ],
+-  // vLLM-specific categories
+-  'vLLM Overview': [
+-    "What's the overall health of this vLLM model?",
+-    "Are there any performance issues I should investigate?",
+-    "How are the GPU resources being utilized?",
+-    "What optimizations would you recommend?"
+-  ],
+-  'Request Tracking & Throughput': [
+-    "How many requests are currently being processed?",
+-    "Are there any request errors or failures?",
+-    "What's the current request throughput?",
+-    "Are there requests waiting in the queue?"
+-  ],
+-  'Token Throughput': [
+-    "What's the current token generation rate?",
+-    "How are prompt and output tokens trending?",
+-    "Are there any token processing bottlenecks?",
+-    "What's the average tokens per request?"
+-  ],
+-  'Latency & Timing': [
+-    "What's the current P95 latency?",
+-    "How is the time to first token (TTFT) performing?",
+-    "Are there any latency spikes I should investigate?",
+-    "What's causing high queue or processing times?"
+-  ],
+-  'Memory & Cache': [
+-    "How is the KV cache utilization?",
+-    "Are there any cache efficiency issues?",
+-    "What's the current cache fragmentation level?",
+-    "Are we hitting cache capacity limits?"
+-  ],
+-  'Scheduling & Queueing': [
+-    "How is batch scheduling performing?",
+-    "What's the current batch size?",
+-    "Are there scheduling delays or idle time?",
+-    "How many requests are pending in the queue?"
+-  ],
+-  'GPU Hardware': [
+-    "What's the current GPU temperature and power usage?",
+-    "Are any GPUs running too hot?",
+-    "How is GPU memory utilization?",
+-    "Is GPU energy consumption within normal range?"
+-  ],
+-  'RPC Monitoring': [
+-    "Are there any RPC errors?",
+-    "How are RPC connections performing?",
+-    "What's the RPC request volume?",
+-    "Are there any RPC performance issues?"
+-  ],
+-  'Request Parameters': [
+-    "What are the typical request parameters?",
+-    "How are max tokens settings configured?",
+-    "What's the average tokens per iteration?",
+-    "Are request parameters optimally configured?"
+-  ]
+ };
+ 
+ // Fallback general questions
+@@ -168,14 +105,12 @@ const GENERAL_OPENSHIFT_QUESTIONS = [
+ ];
+ 
+ export const MetricsChatPanel: React.FC<MetricsChatPanelProps> = ({
+-  pageType = 'openshift',
+   scope,
+   namespace,
+   category,
+   timeRange,
+   isOpen,
+   onClose,
+-  modelName,
+ }) => {
+   const [messages, setMessages] = React.useState<ChatMessage[]>([]);
+   const [currentQuestion, setCurrentQuestion] = React.useState<string>('');
+@@ -258,44 +193,17 @@ export const MetricsChatPanel: React.FC<MetricsChatPanelProps> = ({
+       let responseContent = '';
+       let promqlContent: string | undefined = undefined;
+ 
+-      if (pageType === 'vllm') {
+-        // Call vLLM-specific chat API
+-        if (!modelName) {
+-          setError('Model name is required for vLLM chat');
+-          setIsLoading(false);
+-          return;
+-        }
+-
+-        // Enhance question with category context if it's a general question
+-        const contextualQuestion = category !== 'vLLM Overview'
+-          ? `[Category: ${category}] ${question}`
+-          : question;
+-
+-        const result = await chatVLLM(
+-          modelName,
+-          namespace,
+-          contextualQuestion,
+-          timeRange,
+-          config.ai_model,
+-          config.api_key
+-        );
+-
+-        responseContent = result.response;
+-      } else {
+-        // Call OpenShift-specific chat API for dashboard context.
+-        const result = await chatOpenShift(
+-          category,
+-          question,
+-          scope,
+-          scope === 'namespace_scoped' ? namespace : undefined,
+-          timeRange,
+-          config.ai_model,
+-          config.api_key
+-        );
+-
+-        responseContent = result.response;
+-        promqlContent = result.promql;
+-      }
++      const result = await chatOpenShift(
++        category,
++        question,
++        scope,
++        scope === 'namespace_scoped' ? namespace : undefined,
++        timeRange,
++        config.ai_model,
++        config.api_key
++      );
++      responseContent = result.response;
++      promqlContent = result.promql;
+ 
+       // Add assistant message
+       const assistantMessage: ChatMessage = {
+@@ -381,23 +289,11 @@ export const MetricsChatPanel: React.FC<MetricsChatPanelProps> = ({
+         {/* Context Info */}
+         <Alert variant="info" isInline title="Chat Context" style={{ marginBottom: '12px' }}>
+           <Text component={TextVariants.small}>
+-            {pageType === 'vllm' ? (
+-              <>
+-                <strong>Model:</strong> {modelName || 'N/A'}<br/>
+-                <strong>Category:</strong> {category}<br/>
+-                <strong>Namespace:</strong> {namespace || 'all'}<br/>
+-                <strong>Time Range:</strong> {timeRange}<br/>
+-                <em style={{ fontSize: '0.85em', color: 'var(--pf-v5-global--Color--200)' }}>
+-                  💡 Tip: Click on metric categories below to see category-specific questions
+-                </em>
+-              </>
+-            ) : (
+-              <>
+-                <strong>Category:</strong> {category}<br/>
+-                <strong>Scope:</strong> {scope === 'cluster_wide' ? 'Cluster-wide' : namespace}<br/>
+-                <strong>Time Range:</strong> {timeRange}
+-              </>
+-            )}
++            <>
++              <strong>Category:</strong> {category}<br/>
++              <strong>Scope:</strong> {scope === 'cluster_wide' ? 'Cluster-wide' : namespace}<br/>
++              <strong>Time Range:</strong> {timeRange}
++            </>
+           </Text>
+         </Alert>
+ 
+@@ -565,9 +461,7 @@ export const MetricsChatPanel: React.FC<MetricsChatPanelProps> = ({
+               value={currentQuestion}
+               onChange={(_event, value) => setCurrentQuestion(value)}
+               onKeyPress={handleKeyPress}
+-              placeholder={pageType === 'vllm'
+-                ? `Ask about ${category} for ${modelName?.split(' | ')[1] || 'this model'}...`
+-                : `Ask a question about ${category} metrics...`}
++              placeholder={`Ask a question about ${category} metrics...`}
+               isDisabled={isLoading}
+               aria-label="Type your question"
+             />
+diff --git a/openshift-plugin/src/core/components/SuggestedQuestions.tsx b/openshift-plugin/src/core/components/SuggestedQuestions.tsx
+index 09d6162..3d8e9f4 100644
+--- a/openshift-plugin/src/core/components/SuggestedQuestions.tsx
++++ b/openshift-plugin/src/core/components/SuggestedQuestions.tsx
+@@ -11,13 +11,9 @@ import {
+   ExpandableSection,
+ } from '@patternfly/react-core';
+ import {
+-  CubeIcon,
+   ExclamationTriangleIcon,
+-  ChartLineIcon,
+   TachometerAltIcon,
+   ServerIcon,
+-  ClockIcon,
+-  DatabaseIcon,
+   BellIcon,
+ } from '@patternfly/react-icons';
+ 
+@@ -28,62 +24,30 @@ interface SuggestedQuestion {
+   question: string;
+ }
+ 
+-const ALL_SUGGESTED_QUESTIONS: (SuggestedQuestion & { requiresGpu?: boolean })[] = [
+-  {
+-    id: 'gpu-util',
+-    icon: CubeIcon,
+-    label: 'GPU Utilization',
+-    question: "What's the current GPU utilization across all models?",
+-    requiresGpu: true,
+-  },
++const ALL_SUGGESTED_QUESTIONS: SuggestedQuestion[] = [
+   {
+     id: 'performance',
+     icon: ExclamationTriangleIcon,
+     label: 'Performance Issues',
+     question: 'Are there any performance issues I should be aware of?',
+-    requiresGpu: false,
+-  },
+-  {
+-    id: 'vllm-health',
+-    icon: ChartLineIcon,
+-    label: 'vLLM Health',
+-    question: 'Summarize the health of my vLLM deployments',
+-    requiresGpu: true,
+   },
+   {
+     id: 'cpu-memory',
+     icon: TachometerAltIcon,
+     label: 'CPU & Memory Trends',
+     question: 'Show me CPU and memory trends for the last hour',
+-    requiresGpu: false,
+   },
+   {
+     id: 'resource-consumers',
+     icon: ServerIcon,
+     label: 'Resource Consumers',
+     question: 'What are the top resource consumers in my cluster?',
+-    requiresGpu: false,
+-  },
+-  {
+-    id: 'latency-queue',
+-    icon: ClockIcon,
+-    label: 'Latency & Queue',
+-    question: 'Analyze request latency and queue depth',
+-    requiresGpu: true,
+-  },
+-  {
+-    id: 'cache-efficiency',
+-    icon: DatabaseIcon,
+-    label: 'Cache Efficiency',
+-    question: 'Check KV cache efficiency and hit rates',
+-    requiresGpu: true,
+   },
+   {
+     id: 'alerts',
+     icon: BellIcon,
+     label: 'Alerts & Anomalies',
+     question: 'Show me any alerts or anomalies',
+-    requiresGpu: false,
+   },
+ ];
+ 
+@@ -91,19 +55,14 @@ interface SuggestedQuestionsProps {
+   onSelectQuestion: (question: string) => void;
+   isExpanded: boolean;
+   onToggle: (expanded: boolean) => void;
+-  gpuAvailable?: boolean | undefined;
+ }
+ 
+ export const SuggestedQuestions: React.FC<SuggestedQuestionsProps> = ({
+   onSelectQuestion,
+   isExpanded,
+   onToggle,
+-  gpuAvailable,
+ }) => {
+-  // Filter out GPU-related questions when GPU is not available
+-  const SUGGESTED_QUESTIONS = gpuAvailable === true
+-    ? ALL_SUGGESTED_QUESTIONS
+-    : ALL_SUGGESTED_QUESTIONS.filter(q => !q.requiresGpu);
++  const SUGGESTED_QUESTIONS = ALL_SUGGESTED_QUESTIONS;
+   return (
+     <ExpandableSection
+       toggleText={isExpanded ? "Hide suggested questions" : "Show suggested questions"}
+diff --git a/openshift-plugin/src/core/data/openshiftMetricsConfig.ts b/openshift-plugin/src/core/data/openshiftMetricsConfig.ts
+index 1ce1952..6288978 100644
+--- a/openshift-plugin/src/core/data/openshiftMetricsConfig.ts
++++ b/openshift-plugin/src/core/data/openshiftMetricsConfig.ts
+@@ -79,20 +79,6 @@ export const CLUSTER_WIDE_CATEGORIES: Record<string, OpenShiftMetricCategory> =
+       { key: 'PID Pressure', label: 'PIDPressure', unit: '', description: 'Process limit warnings' },
+     ]
+   },
+-  'GPU & Accelerators': {
+-    icon: CubesIcon,
+-    description: 'GPU and accelerator metrics (NVIDIA/Intel Gaudi)',
+-    metrics: [
+-      { key: 'GPU Temperature (°C)', label: 'Temp', unit: '°C', description: 'Average GPU core temp' },
+-      { key: 'GPU Power Usage (W)', label: 'Power', unit: 'W', description: 'Current power consumption' },
+-      { key: 'GPU Utilization (%)', label: 'Util %', unit: '%', description: 'Compute utilization' },
+-      { key: 'GPU Memory Used (GB)', label: 'Mem Used', unit: 'GB', description: 'VRAM currently allocated' },
+-      { key: 'GPU Count', label: 'GPU Count', unit: '', description: 'Available accelerators' },
+-      { key: 'GPU Memory Temp (°C)', label: 'Mem Temp', unit: '°C', description: 'VRAM temperature' },
+-      { key: 'GPU Clock Speed', label: 'Clock', unit: 'MHz', description: 'Core clock frequency' },
+-      { key: 'GPU Energy Usage', label: 'Energy', unit: 'J', description: 'Cumulative energy consumed' },
+-    ]
+-  },
+   'Autoscaling & Scheduling': {
+     icon: NetworkIcon,
+     description: 'Autoscaling and pod scheduling metrics',
+diff --git a/openshift-plugin/src/core/hooks/useChatHistory.ts b/openshift-plugin/src/core/hooks/useChatHistory.ts
+index d8a2741..b18533c 100644
+--- a/openshift-plugin/src/core/hooks/useChatHistory.ts
++++ b/openshift-plugin/src/core/hooks/useChatHistory.ts
+@@ -1,7 +1,7 @@
+ import * as React from 'react';
+ import { ChatScope } from '../data/namespaceDefaults';
+ 
+-const STORAGE_KEY = 'openshift_ai_chat_history';
++const STORAGE_KEY = 'aiobs_standalone_chat_history';
+ const SETTINGS_KEY = 'openshift_ai_chat_settings';
+ const DEFAULT_MAX_MESSAGES = 50;
+ 
+@@ -39,15 +39,9 @@ export interface Message {
+ const getInitialGreeting = (gpuAvailable?: boolean): Message => ({
+   id: '1',
+   role: 'assistant',
+-  content: gpuAvailable === true
+-    ? `👋 Hello! I'm your AI Observability Assistant.
++  content: `👋 Hello! I'm your OpenShift Observability Assistant.
+ 
+-I can help you understand your vLLM and OpenShift metrics. Try asking me questions or click one of the suggested questions below to get started.
+-
+-How can I help you today?`
+-    : `👋 Hello! I'm your AI Observability Assistant.
+-
+-I can help you understand your OpenShift metrics. Try asking me questions or click one of the suggested questions below to get started.
++I can help you understand cluster, node, workload, storage, and networking metrics. Ask a question or choose a suggested prompt to get started.
+ 
+ How can I help you today?`,
+   timestamp: new Date(),
+diff --git a/openshift-plugin/src/core/pages/AIChatPage.tsx b/openshift-plugin/src/core/pages/AIChatPage.tsx
+index b8d1a20..763e4d9 100644
+--- a/openshift-plugin/src/core/pages/AIChatPage.tsx
++++ b/openshift-plugin/src/core/pages/AIChatPage.tsx
+@@ -760,7 +760,6 @@ const AIChatPage: React.FC<AIChatPageProps> = ({ gpuAvailable }) => {
+                     setCategoriesExpanded(false);
+                   }
+                 }}
+-                gpuAvailable={gpuAvailable}
+               />
+             </div>
+           )}
+@@ -904,10 +903,7 @@ const AIChatPage: React.FC<AIChatPageProps> = ({ gpuAvailable }) => {
+           </Flex>
+           <TextContent style={{ marginTop: '8px' }}>
+             <Text component={TextVariants.small} style={{ color: 'var(--pf-v5-global--Color--200)' }}>
+-              {gpuAvailable === true
+-                ? "💡 Try: \"What's my GPU utilization?\" or \"Summarize vLLM health\""
+-                : "💡 Try: \"What's the overall health of my cluster?\" or \"Show me resource utilization trends\""
+-              }
++              💡 Try: "What's the overall health of my cluster?" or "Show me resource utilization trends"
+             </Text>
+           </TextContent>
+         </CardFooter>
+diff --git a/openshift-plugin/src/core/pages/AIObservabilityPage.tsx b/openshift-plugin/src/core/pages/AIObservabilityPage.tsx
+index 5106812..2911b90 100644
+--- a/openshift-plugin/src/core/pages/AIObservabilityPage.tsx
++++ b/openshift-plugin/src/core/pages/AIObservabilityPage.tsx
+@@ -1,349 +1,43 @@
+ import * as React from 'react';
+-import {
+-  Page,
+-  PageSection,
+-  Title,
+-  Tabs,
+-  Tab,
+-  TabTitleText,
+-  TabTitleIcon,
+-  Flex,
+-  FlexItem,
+-  TextContent,
+-  Text,
+-  TextVariants,
+-  Label,
+-  Button,
+-  Alert,
+-  AlertVariant,
+-} from '@patternfly/react-core';
+-import {
+-  TachometerAltIcon,
+-  ServerIcon,
+-  CubeIcon,
+-  CubesIcon,
+-  CommentIcon,
+-  CogIcon,
+-} from '@patternfly/react-icons';
+-import VLLMMetricsPage from './VLLMMetricsPage';
+-import DeviceMetricsPage from './DeviceMetricsPage';
+-import { OpenShiftMetricsPage } from './OpenShiftMetricsPage';
+-import { AIChatPage } from './AIChatPage';
++import { Page, PageSection, Title, Tabs, Tab, TabTitleText, TabTitleIcon, Button, Flex, FlexItem, Label } from '@patternfly/react-core';
++import { CubesIcon, CommentIcon, CogIcon } from '@patternfly/react-icons';
++import OpenShiftMetricsPage from './OpenShiftMetricsPage';
++import AIChatPage from './AIChatPage';
+ import { SettingsModal } from '../components/SettingsModal';
+-import { ModelInsightsSection, QuickActionsSection, StatusSummarySection } from '../components';
+-import { getSessionConfig, healthCheck, listModels, listNamespaces, getGpuAvailability } from '../services/mcpClient';
+-import type { ModelInfo, NamespaceInfo } from '../services/mcpClient';
++import { getSessionConfig } from '../services/mcpClient';
+ import { initializeRuntimeConfig } from '../services/runtimeConfig';
+ import { DEV_CACHE_CLEARED_EVENT } from '../constants';
+-
+-// Overview Dashboard Component
+-interface OverviewDashboardProps {
+-  gpuAvailable?: boolean | undefined;
+-}
+-
+-const OverviewDashboard: React.FC<OverviewDashboardProps> = ({ gpuAvailable }) => {
+-  const [loading, setLoading] = React.useState(true);
+-  const [error, setError] = React.useState<string | null>(null);
+-  const [mcpConnected, setMcpConnected] = React.useState(false);
+-  const [models, setModels] = React.useState<ModelInfo[]>([]);
+-  const [namespaces, setNamespaces] = React.useState<NamespaceInfo[]>([]);
+-
++interface AIObservabilityPageProps { activeTab?: number; onTabChange?: (tabIndex: number) => void; }
++const AIObservabilityPage: React.FC<AIObservabilityPageProps> = ({ activeTab: externalTab, onTabChange }) => {
++  const [tab, setTab] = React.useState(0);
++  const [settingsOpen, setSettingsOpen] = React.useState(false);
++  const [modelName, setModelName] = React.useState('');
++  const activeTab = externalTab ?? tab;
++  const selectTab = onTabChange ?? setTab;
+   React.useEffect(() => {
+-    let isMounted = true;
+-
+-    const loadOverview = async () => {
+-      setLoading(true);
+-      setError(null);
+-      try {
+-        const [isHealthy, modelsResponse, namespacesResponse] = await Promise.all([
+-          healthCheck(),
+-          listModels(),
+-          listNamespaces(),
+-        ]);
+-        if (!isMounted) {
+-          return;
+-        }
+-        setMcpConnected(isHealthy);
+-        setModels(modelsResponse);
+-        setNamespaces(namespacesResponse);
+-      } catch (err) {
+-        if (!isMounted) {
+-          return;
+-        }
+-        setError('Failed to load overview data');
+-        setMcpConnected(false);
+-        setModels([]);
+-        setNamespaces([]);
+-      } finally {
+-        if (isMounted) {
+-          setLoading(false);
+-        }
+-      }
+-    };
+-
+-    loadOverview();
+-
+-    return () => {
+-      isMounted = false;
+-    };
++    initializeRuntimeConfig().catch((error) => console.error('Failed to initialize runtime config:', error));
++    const refresh = () => setModelName(getSessionConfig().ai_model || '');
++    refresh(); window.addEventListener(DEV_CACHE_CLEARED_EVENT, refresh);
++    return () => window.removeEventListener(DEV_CACHE_CLEARED_EVENT, refresh);
+   }, []);
+-
+-  return (
+-    <>
+-      {/* GPU Unavailable Banner */}
+-      {gpuAvailable === false && (
+-        <Alert
+-          variant={AlertVariant.info}
+-          isInline
+-          title="GPU/Accelerator features unavailable on this cluster"
+-          style={{ marginBottom: '24px' }}
+-        >
+-          <p>
+-            Application is running on non-GPU cluster. Following features are missing:
+-          </p>
+-          <ul style={{ marginTop: '8px', marginLeft: '20px' }}>
+-            <li>vLLM Metrics</li>
+-            <li>Hardware Accelerators metrics</li>
+-            <li>Chat functionality regarding GPU and vLLM metrics</li>
+-          </ul>
+-          <p style={{ marginTop: '8px' }}>
+-            To enable features, ensure you are on a cluster that has GPU or hardware accelerators configured.
+-          </p>
+-        </Alert>
+-      )}
+-
+-      <StatusSummarySection
+-        loading={loading}
+-        error={error}
+-        mcpConnected={mcpConnected}
+-        models={models}
+-        namespaces={namespaces}
+-        gpuAvailable={gpuAvailable}
+-      />
+-      {/* Only show Model Insights section if GPU available (vLLM metrics) */}
+-      {gpuAvailable === true && (
+-        <ModelInsightsSection loading={loading} error={error} models={models} />
+-      )}
+-      <QuickActionsSection gpuAvailable={gpuAvailable} />
+-    </>
+-  );
+-};
+-
+-interface AIObservabilityPageProps {
+-  activeTab?: number;
+-  onTabChange?: (tabIndex: number) => void;
+-}
+-
+-// Main Page with Tabs
+-const AIObservabilityPage: React.FC<AIObservabilityPageProps> = ({
+-  activeTab: externalActiveTab,
+-  onTabChange: externalOnTabChange,
+-}) => {
+-  const [internalActiveTab, setInternalActiveTab] = React.useState<number>(0);
+-  const [isSettingsOpen, setIsSettingsOpen] = React.useState(false);
+-  const [configuredModel, setConfiguredModel] = React.useState<string>('');
+-  // CRITICAL: Start with undefined (loading state), not true
+-  // This prevents briefly showing vLLM tab on non-GPU clusters
+-  const [gpuAvailable, setGpuAvailable] = React.useState<boolean | undefined>(undefined);
+-
+-  // Use external props if provided (React UI), otherwise use internal state (console plugin)
+-  const activeTabKey = externalActiveTab !== undefined ? externalActiveTab : internalActiveTab;
+-  const setActiveTabKey = externalOnTabChange || setInternalActiveTab;
+-
+-  React.useEffect(() => {
+-    // Initialize runtime config on first load
+-    initializeRuntimeConfig().catch((error) => {
+-      console.error('Failed to initialize runtime config:', error);
+-    });
+-
+-    // Fetch GPU availability
+-    getGpuAvailability().then(setGpuAvailable).catch((error) => {
+-      console.error('Failed to check GPU availability:', error);
+-      setGpuAvailable(false); // Safe default on error
+-    });
+-
+-    const config = getSessionConfig();
+-    setConfiguredModel(config.ai_model || '');
+-
+-    // Listen for open-settings event from child components
+-    const handleOpenSettings = () => {
+-      setIsSettingsOpen(true);
+-    };
+-    const handleQuickActionNavigate = (event: Event) => {
+-      const detail = (event as CustomEvent<{ tabIndex: number }>).detail;
+-      if (detail?.tabIndex === -1) {
+-        setIsSettingsOpen(true);
+-      } else if (typeof detail?.tabIndex === 'number') {
+-        setActiveTabKey(detail.tabIndex);
+-      }
+-    };
+-
+-    // Listen for manual refresh events
+-    const handleGpuChange = (event: Event) => {
+-      setGpuAvailable((event as CustomEvent).detail);
+-    };
+-    const handleCacheCleared = () => {
+-      const updatedConfig = getSessionConfig();
+-      setConfiguredModel(updatedConfig.ai_model || '');
+-    };
+-
+-    window.addEventListener('open-settings', handleOpenSettings);
+-    window.addEventListener('quick-action-navigate', handleQuickActionNavigate);
+-    window.addEventListener('gpu-availability-changed', handleGpuChange);
+-    window.addEventListener(DEV_CACHE_CLEARED_EVENT, handleCacheCleared);
+-
+-    return () => {
+-      window.removeEventListener('open-settings', handleOpenSettings);
+-      window.removeEventListener('quick-action-navigate', handleQuickActionNavigate);
+-      window.removeEventListener('gpu-availability-changed', handleGpuChange);
+-      window.removeEventListener(DEV_CACHE_CLEARED_EVENT, handleCacheCleared);
+-    };
+-  }, [setActiveTabKey]);
+-
+-  // Guard against invalid activeTabKey when GPU unavailable
+-  React.useEffect(() => {
+-    if (gpuAvailable === false && (activeTabKey === 1 || activeTabKey === 2)) {
+-      // vLLM tab (1) or Hardware Accelerators tab (2) is hidden but currently selected
+-      // Force switch to Overview tab
+-      setActiveTabKey(0);
+-    }
+-  }, [gpuAvailable, activeTabKey]);
+-
+-  const handleTabClick = (
+-    _event: React.MouseEvent<HTMLElement, MouseEvent>,
+-    tabIndex: string | number,
+-  ) => {
+-    setActiveTabKey(Number(tabIndex));
+-  };
+-
+-  const handleSettingsSave = () => {
+-    const config = getSessionConfig();
+-    setConfiguredModel(config.ai_model || '');
+-  };
+-
+   const handleSettingsClose = () => {
+-    setIsSettingsOpen(false);
+-    // Dispatch custom event to notify AIChatPage that settings were closed
++    setSettingsOpen(false); setModelName(getSessionConfig().ai_model || '');
+     window.dispatchEvent(new CustomEvent('settings-closed'));
+   };
+-
+-  return (
+-    <Page>
+-      <PageSection variant="light">
+-        <Flex
+-          justifyContent={{ default: 'justifyContentSpaceBetween' }}
+-          alignItems={{ default: 'alignItemsCenter' }}
+-        >
+-          <FlexItem>
+-            <Title headingLevel="h1" size="2xl">
+-              AI Observability
+-            </Title>
+-            <TextContent>
+-              <Text component={TextVariants.p} style={{ color: 'var(--pf-v5-global--Color--200)' }}>
+-                {gpuAvailable === true
+-                  ? "Monitor, analyze, and get AI-powered insights for your vLLM and OpenShift workloads"
+-                  : "Monitor, analyze and get AI-powered insights for OpenShift metrics"}
+-              </Text>
+-            </TextContent>
+-          </FlexItem>
+-          <FlexItem>
+-            <Button variant="secondary" onClick={() => setIsSettingsOpen(true)} icon={<CogIcon />}>
+-              Settings
+-              {configuredModel && (
+-                <Label color="blue" isCompact style={{ marginLeft: '8px' }}>
+-                  {configuredModel.split('/').pop()}
+-                </Label>
+-              )}
+-            </Button>
+-          </FlexItem>
+-        </Flex>
+-      </PageSection>
+-
+-      <SettingsModal
+-        isOpen={isSettingsOpen}
+-        onClose={handleSettingsClose}
+-        onSave={handleSettingsSave}
+-      />
+-
+-      <PageSection type="tabs" variant="light" style={{ paddingBottom: 0 }}>
+-        <Tabs activeKey={activeTabKey} onSelect={handleTabClick} aria-label="AI Observability tabs">
+-          <Tab
+-            eventKey={0}
+-            title={
+-              <>
+-                <TabTitleIcon>
+-                  <TachometerAltIcon />
+-                </TabTitleIcon>
+-                <TabTitleText>Overview</TabTitleText>
+-              </>
+-            }
+-            aria-label="Overview"
+-          />
+-          {/* Only show vLLM Metrics tab if GPU available */}
+-          {gpuAvailable === true && (
+-            <Tab
+-              eventKey={1}
+-              title={
+-                <>
+-                  <TabTitleIcon>
+-                    <ServerIcon />
+-                  </TabTitleIcon>
+-                  <TabTitleText>vLLM Metrics</TabTitleText>
+-                </>
+-              }
+-              aria-label="vLLM Metrics"
+-            />
+-          )}
+-          {/* Only show Hardware Accelerators tab if GPU available (only shows GPU/accelerator metrics) */}
+-          {gpuAvailable === true && (
+-            <Tab
+-              eventKey={2}
+-              title={
+-                <>
+-                  <TabTitleIcon><CubeIcon /></TabTitleIcon>
+-                  <TabTitleText>Hardware Accelerators</TabTitleText>
+-                </>
+-              }
+-              aria-label="Hardware Accelerators"
+-            />
+-          )}
+-          <Tab
+-            eventKey={3}
+-            title={
+-              <>
+-                <TabTitleIcon>
+-                  <CubesIcon />
+-                </TabTitleIcon>
+-                <TabTitleText>OpenShift</TabTitleText>
+-              </>
+-            }
+-            aria-label="OpenShift Metrics"
+-          />
+-          <Tab
+-            eventKey={4}
+-            title={
+-              <>
+-                <TabTitleIcon>
+-                  <CommentIcon />
+-                </TabTitleIcon>
+-                <TabTitleText>Chat with Prometheus</TabTitleText>
+-              </>
+-            }
+-            aria-label="Chat with Prometheus"
+-          />
+-        </Tabs>
+-      </PageSection>
+-
+-      <PageSection>
+-        {activeTabKey === 0 && <OverviewDashboard gpuAvailable={gpuAvailable} />}
+-        {activeTabKey === 1 && gpuAvailable === true && <VLLMMetricsPage />}
+-        {activeTabKey === 2 && gpuAvailable === true && <DeviceMetricsPage />}
+-        {activeTabKey === 3 && <OpenShiftMetricsPage />}
+-        {activeTabKey === 4 && <AIChatPage gpuAvailable={gpuAvailable} />}
+-      </PageSection>
+-    </Page>
+-  );
++  return <Page>
++    <PageSection variant="light"><Flex justifyContent={{ default: 'justifyContentSpaceBetween' }} alignItems={{ default: 'alignItemsCenter' }}>
++      <FlexItem><Title headingLevel="h1" size="2xl">OpenShift Observability</Title></FlexItem>
++      <FlexItem><Button variant="secondary" onClick={() => setSettingsOpen(true)} icon={<CogIcon />}>Settings{modelName && <Label color="blue" isCompact style={{ marginLeft: '8px' }}>{modelName.split('/').pop()}</Label>}</Button></FlexItem>
++    </Flex></PageSection>
++    <SettingsModal isOpen={settingsOpen} onClose={handleSettingsClose} onSave={handleSettingsClose} />
++    <PageSection type="tabs" variant="light" style={{ paddingBottom: 0 }}>
++      <Tabs activeKey={activeTab} onSelect={(_event, key) => selectTab(Number(key))} aria-label="OpenShift Observability tabs">
++        <Tab eventKey={0} title={<><TabTitleIcon><CubesIcon /></TabTitleIcon><TabTitleText>OpenShift Metrics</TabTitleText></>} aria-label="OpenShift Metrics" />
++        <Tab eventKey={1} title={<><TabTitleIcon><CommentIcon /></TabTitleIcon><TabTitleText>Chat</TabTitleText></>} aria-label="Chat" />
++      </Tabs>
++    </PageSection>
++    <PageSection>{activeTab === 0 && <OpenShiftMetricsPage />}{activeTab === 1 && <AIChatPage />}</PageSection>
++  </Page>;
+ };
+-
+ export { AIObservabilityPage };
+ export default AIObservabilityPage;
+diff --git a/openshift-plugin/src/core/pages/OpenShiftMetricsPage.tsx b/openshift-plugin/src/core/pages/OpenShiftMetricsPage.tsx
+index 00fa75b..df535ce 100644
+--- a/openshift-plugin/src/core/pages/OpenShiftMetricsPage.tsx
++++ b/openshift-plugin/src/core/pages/OpenShiftMetricsPage.tsx
+@@ -41,7 +41,6 @@ import {
+   CubeIcon,
+   ServerIcon,
+   NetworkIcon,
+-  CubesIcon,
+   ChartLineIcon,
+   DownloadIcon,
+   RobotIcon,
+@@ -55,7 +54,7 @@ import { MetricChartModal } from '../components/MetricChartModal';
+ import { MetricsChatPanel } from '../components/MetricsChatPanel';
+ import { CustomRangePickerModal } from '../components/CustomRangePickerModal';
+ import { ConfigurationRequiredAlert } from '../components/ConfigurationRequiredAlert';
+-import { formatValue, GPU_THRESHOLDS } from '../utils/formatValue';
++import { formatValue } from '../utils/formatValue';
+ import {
+   fetchOpenShiftMetrics,
+   listOpenShiftNamespaces,
+@@ -103,7 +102,7 @@ interface MetricCardProps {
+   metricKey: string;
+   onViewChart?: (metricKey: string) => void;
+   icon?: React.ComponentType;
+-  secondaryInfo?: React.ReactNode; // For custom secondary metrics (e.g., GPU utilization/temperature)
++  secondaryInfo?: React.ReactNode; // Optional secondary metric details
+ }
+ 
+ const MetricCard: React.FC<MetricCardProps> = ({ label, value, unit, description, timeSeries, metricKey, onViewChart, icon, secondaryInfo }) => {
+@@ -268,150 +267,6 @@ interface MetricDataValue {
+   time_series?: TimeSeriesPoint[];
+ }
+ 
+-// GPU Fleet Summary Component
+-interface GPUFleetSummaryProps {
+-  metricsData: Record<string, MetricDataValue>;
+-}
+-
+-const GPUFleetSummary: React.FC<GPUFleetSummaryProps> = ({ metricsData }) => {
+-  // Calculate fleet-wide GPU statistics
+-  const totalGPUs = metricsData['GPU Count']?.latest_value || 0;
+-  const avgUtil = (() => {
+-    const utilSeries = metricsData['GPU Utilization (%)']?.time_series;
+-    if (!utilSeries || utilSeries.length === 0) return null;
+-    const sum = utilSeries.reduce((acc, pt) => acc + pt.value, 0);
+-    return sum / utilSeries.length;
+-  })();
+-  
+-  const avgTemp = (() => {
+-    const tempSeries = metricsData['GPU Temperature (°C)']?.time_series;
+-    if (!tempSeries || tempSeries.length === 0) return null;
+-    const sum = tempSeries.reduce((acc, pt) => acc + pt.value, 0);
+-    return sum / tempSeries.length;
+-  })();
+-  
+-  const totalPower = metricsData['GPU Power Usage (W)']?.latest_value || 0;
+-  
+-  // Health alerts based on thresholds
+-  const hotGPUs = avgTemp && avgTemp > GPU_THRESHOLDS.TEMPERATURE_CRITICAL ? Math.ceil(totalGPUs * 0.2) : 0; // Estimate based on temp
+-  const overloadedGPUs = avgUtil && avgUtil > GPU_THRESHOLDS.UTILIZATION_CRITICAL ? Math.ceil(totalGPUs * 0.1) : 0; // Estimate
+-  
+-
+-  return (
+-    <Card style={{ marginBottom: '16px', background: 'linear-gradient(135deg, #f0f9ff 0%, #e0f2fe 100%)', border: '1px solid #0891b2' }}>
+-      <CardTitle>
+-        <Flex alignItems={{ default: 'alignItemsCenter' }}>
+-          <FlexItem>
+-            <CubesIcon style={{ color: '#0891b2', marginRight: '8px' }} />
+-            GPU Fleet Overview
+-          </FlexItem>
+-          <FlexItem align={{ default: 'alignRight' }}>
+-            <Text component={TextVariants.small} style={{ color: '#0891b2', fontWeight: 600 }}>
+-              Cluster-wide Summary
+-            </Text>
+-          </FlexItem>
+-        </Flex>
+-      </CardTitle>
+-      <CardBody>
+-        <Grid hasGutter>
+-          <GridItem sm={6} md={3}>
+-            <div style={{ textAlign: 'center', padding: '12px', background: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+-              <Text component={TextVariants.small} style={{ color: '#666', display: 'block', marginBottom: '4px' }}>
+-                Total GPUs
+-              </Text>
+-              <Text component={TextVariants.h2} style={{ color: '#0891b2', fontWeight: 700 }}>
+-                {totalGPUs}
+-              </Text>
+-              <Text component={TextVariants.small} style={{ color: '#666' }}>
+-                accelerators
+-              </Text>
+-            </div>
+-          </GridItem>
+-          
+-          <GridItem sm={6} md={3}>
+-            <div style={{ textAlign: 'center', padding: '12px', background: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+-              <Text component={TextVariants.small} style={{ color: '#666', display: 'block', marginBottom: '4px' }}>
+-                Avg Utilization
+-              </Text>
+-              <Text component={TextVariants.h2} style={{ 
+-                color: avgUtil && avgUtil > GPU_THRESHOLDS.UTILIZATION_WARNING ? '#dc2626' : avgUtil && avgUtil > GPU_THRESHOLDS.UTILIZATION_HIGH ? '#ea580c' : '#059669',
+-                fontWeight: 700 
+-              }}>
+-                {formatValue(avgUtil, '%').value}%
+-              </Text>
+-              <Text component={TextVariants.small} style={{ color: '#666' }}>
+-                compute usage
+-              </Text>
+-            </div>
+-          </GridItem>
+-          
+-          <GridItem sm={6} md={3}>
+-            <div style={{ textAlign: 'center', padding: '12px', background: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+-              <Text component={TextVariants.small} style={{ color: '#666', display: 'block', marginBottom: '4px' }}>
+-                Avg Temperature
+-              </Text>
+-              <Text component={TextVariants.h2} style={{ 
+-                color: avgTemp && avgTemp > GPU_THRESHOLDS.TEMPERATURE_DANGER ? '#dc2626' : avgTemp && avgTemp > GPU_THRESHOLDS.TEMPERATURE_WARNING ? '#ea580c' : '#059669',
+-                fontWeight: 700 
+-              }}>
+-                {avgTemp !== null ? Math.round(avgTemp) : '—'}°C
+-              </Text>
+-              <Text component={TextVariants.small} style={{ color: '#666' }}>
+-                thermal status
+-              </Text>
+-            </div>
+-          </GridItem>
+-          
+-          <GridItem sm={6} md={3}>
+-            <div style={{ textAlign: 'center', padding: '12px', background: '#fff', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+-              <Text component={TextVariants.small} style={{ color: '#666', display: 'block', marginBottom: '4px' }}>
+-                Fleet Power
+-              </Text>
+-              <Text component={TextVariants.h2} style={{ color: '#0891b2', fontWeight: 700 }}>
+-                {(() => {
+-                  const formatted = formatValue(totalPower, 'W');
+-                  return `${formatted.value}${formatted.unit}`;
+-                })()}
+-              </Text>
+-              <Text component={TextVariants.small} style={{ color: '#666' }}>
+-                total consumption
+-              </Text>
+-            </div>
+-          </GridItem>
+-        </Grid>
+-        
+-        {/* Health Status */}
+-        {(hotGPUs > 0 || overloadedGPUs > 0) && (
+-          <div style={{ marginTop: '16px', padding: '12px', background: '#fef3c7', borderRadius: '8px', border: '1px solid #f59e0b' }}>
+-            <Flex alignItems={{ default: 'alignItemsCenter' }}>
+-              <FlexItem>
+-                <Text component={TextVariants.small} style={{ color: '#92400e', fontWeight: 600 }}>
+-                  ⚠️ Fleet Health Alerts:
+-                </Text>
+-              </FlexItem>
+-              {hotGPUs > 0 && (
+-                <FlexItem style={{ marginLeft: '12px' }}>
+-                  <Text component={TextVariants.small} style={{ color: '#92400e' }}>
+-                    {hotGPUs} GPUs running hot (&gt;{GPU_THRESHOLDS.TEMPERATURE_CRITICAL}°C)
+-                  </Text>
+-                </FlexItem>
+-              )}
+-              {overloadedGPUs > 0 && (
+-                <FlexItem style={{ marginLeft: '12px' }}>
+-                  <Text component={TextVariants.small} style={{ color: '#92400e' }}>
+-                    {overloadedGPUs} GPUs overloaded (&gt;{GPU_THRESHOLDS.UTILIZATION_CRITICAL}%)
+-                  </Text>
+-                </FlexItem>
+-              )}
+-            </Flex>
+-          </div>
+-        )}
+-      </CardBody>
+-    </Card>
+-  );
+-};
+-
+-// Category Section Component
+ interface CategorySectionProps {
+   categoryKey: string;
+   categoryDef: {
+@@ -426,41 +281,6 @@ interface CategorySectionProps {
+ const CategorySection: React.FC<CategorySectionProps> = ({ categoryKey, categoryDef, metricsData, onViewChart }) => {
+   const IconComponent = categoryDef.icon;
+ 
+-  // Check if GPUs are available for Fleet Overview category
+-  const gpuCount = metricsData['GPU Count']?.latest_value ?? 0;
+-  const hasGPUMetrics = 
+-    (metricsData['GPU Utilization (%)']?.latest_value !== null) ||
+-    (metricsData['GPU Temperature (°C)']?.latest_value !== null) ||
+-    (metricsData['GPU Power Usage (W)']?.latest_value !== null) ||
+-    (metricsData['GPU Memory Used (GB)']?.latest_value !== null);
+-  
+-  const hasGPUs = categoryKey === 'Fleet Overview' && (gpuCount > 0 || hasGPUMetrics);
+-
+-  // Create GPU summary data for Fleet Overview  
+-  // Use GPU Count if available and > 0, otherwise try to estimate from power consumption
+-  let estimatedCount = gpuCount;
+-  if (estimatedCount === 0 && hasGPUMetrics) {
+-    // Try to estimate based on total power
+-    const totalPower = metricsData['GPU Power Usage (W)']?.latest_value ?? 0;
+-    if (totalPower > 0) {
+-      estimatedCount = Math.max(1, Math.round(totalPower / GPU_THRESHOLDS.POWER_ESTIMATE_PER_GPU));
+-    } else {
+-      // Fallback: if we have GPU metrics but no power data, assume at least 1 GPU
+-      estimatedCount = 1;
+-    }
+-  }
+-  const gpuSummaryData = hasGPUs ? {
+-    count: estimatedCount,
+-    utilization: metricsData['GPU Utilization (%)']?.latest_value ?? null,
+-    temperature: metricsData['GPU Temperature (°C)']?.latest_value ?? null,
+-    power: metricsData['GPU Power Usage (W)']?.latest_value ?? null,
+-  } : null;
+-
+-  const formatValue = (val: number | null): string => {
+-    if (val === null || val === undefined || isNaN(val)) return '—';
+-    return val.toString();
+-  };
+-
+   return (
+     <Card style={{ marginBottom: '16px' }}>
+       <CardTitle>
+@@ -497,52 +317,6 @@ const CategorySection: React.FC<CategorySectionProps> = ({ categoryKey, category
+               </GridItem>
+             );
+           })}
+-          
+-          {/* Conditional GPU Summary Card for Fleet Overview */}
+-          {hasGPUs && gpuSummaryData && (
+-            <GridItem key="gpu-summary" md={2} sm={4}>
+-              <MetricCard
+-                label="GPU Fleet"
+-                value={gpuSummaryData.count}
+-                unit="GPUs"
+-                description={gpuCount > 0 ? 'AI/ML accelerators available' : 'GPU metrics detected'}
+-                metricKey="gpu-fleet-summary"
+-                icon={CubesIcon}
+-                secondaryInfo={
+-                  <>
+-                    {gpuSummaryData.utilization !== null && (
+-                      <Text
+-                        component={TextVariants.small}
+-                        style={{
+-                          color: gpuSummaryData.utilization > GPU_THRESHOLDS.UTILIZATION_WARNING ? '#dc2626' :
+-                                 gpuSummaryData.utilization > GPU_THRESHOLDS.UTILIZATION_HIGH ? '#ea580c' : '#666',
+-                          fontSize: '0.85rem',
+-                          display: 'block',
+-                          marginTop: '2px'
+-                        }}
+-                      >
+-                        Util: {formatValue(gpuSummaryData.utilization)}%
+-                      </Text>
+-                    )}
+-                    {gpuSummaryData.temperature !== null && (
+-                      <Text
+-                        component={TextVariants.small}
+-                        style={{
+-                          color: gpuSummaryData.temperature > GPU_THRESHOLDS.TEMPERATURE_DANGER ? '#dc2626' :
+-                                 gpuSummaryData.temperature > GPU_THRESHOLDS.TEMPERATURE_WARNING ? '#ea580c' : '#666',
+-                          fontSize: '0.85rem',
+-                          display: 'block',
+-                          marginTop: '2px'
+-                        }}
+-                      >
+-                        Temp: {formatValue(gpuSummaryData.temperature)}°C
+-                      </Text>
+-                    )}
+-                  </>
+-                }
+-              />
+-            </GridItem>
+-          )}
+         </Grid>
+       </CardBody>
+     </Card>
+@@ -1522,10 +1296,7 @@ ${report.analysis}
+           </Bullseye>
+         )}
+         
+-        {/* GPU Fleet Summary - Only for GPU category + cluster-wide scope */}
+-        {!loadingMetrics && selectedCategory === 'GPU & Accelerators' && scope === 'cluster_wide' && Object.keys(metricsData).length > 0 && (
+-          <GPUFleetSummary metricsData={metricsData} />
+-        )}
++
+ 
+         {/* Metrics Display */}
+         {!loadingMetrics && currentCategoryDef && (
+diff --git a/openshift-plugin/src/core/pages/VLLMMetricsPage.tsx b/openshift-plugin/src/core/pages/VLLMMetricsPage.tsx
+index 44bb9b7..cc26ff1 100644
+--- a/openshift-plugin/src/core/pages/VLLMMetricsPage.tsx
++++ b/openshift-plugin/src/core/pages/VLLMMetricsPage.tsx
+@@ -1158,14 +1158,12 @@ const VLLMMetricsPage: React.FC = () => {
+             <GridItem span={4}>
+               <div style={{ position: 'sticky', top: '16px', height: 'calc(100vh - 250px)' }}>
+                 <MetricsChatPanel
+-                  pageType="vllm"
+                   scope={namespace || 'all'}
+                   namespace={namespace !== 'all' ? namespace : undefined}
+                   category={selectedCategory}
+                   timeRange={timeRange}
+                   isOpen={chatPanelOpen}
+                   onClose={() => setChatPanelOpen(false)}
+-                  modelName={model}
+                 />
+               </div>
+             </GridItem>
+diff --git a/openshift-plugin/src/core/pages/index.ts b/openshift-plugin/src/core/pages/index.ts
+index 7b9cb94..4c150b7 100644
+--- a/openshift-plugin/src/core/pages/index.ts
++++ b/openshift-plugin/src/core/pages/index.ts
+@@ -1,5 +1,4 @@
+ export { default as AIObservabilityPage } from './AIObservabilityPage';
+-export { default as VLLMMetricsPage } from './VLLMMetricsPage';
+ export { default as OpenShiftMetricsPage } from './OpenShiftMetricsPage';
+ export { default as DeviceMetricsPage } from './DeviceMetricsPage';
+ export { default as AIChatPage } from './AIChatPage';
+diff --git a/openshift-plugin/src/plugin/console-extensions.json b/openshift-plugin/src/plugin/console-extensions.json
+index cd944e9..49cd3fd 100644
+--- a/openshift-plugin/src/plugin/console-extensions.json
++++ b/openshift-plugin/src/plugin/console-extensions.json
+@@ -19,16 +19,6 @@
+       "exact": true
+     }
+   },
+-  {
+-    "type": "console.page/route",
+-    "properties": {
+-      "path": "/observe/ai-observability/vllm",
+-      "component": {
+-        "$codeRef": "VLLMMetricsPage"
+-      },
+-      "exact": true
+-    }
+-  },
+   {
+     "type": "console.page/route",
+     "properties": {
+diff --git a/openshift-plugin/src/plugin/index.ts b/openshift-plugin/src/plugin/index.ts
+index 2153718..2809d34 100644
+--- a/openshift-plugin/src/plugin/index.ts
++++ b/openshift-plugin/src/plugin/index.ts
+@@ -5,6 +5,5 @@
+ 
+ // Export page components for console
+ export { default as AIObservabilityPage } from '../core/pages/AIObservabilityPage';
+-export { default as VLLMMetricsPage } from '../core/pages/VLLMMetricsPage';
+ export { default as OpenShiftMetricsPage } from '../core/pages/OpenShiftMetricsPage';
+ export { default as AIChatPage } from '../core/pages/AIChatPage';
+diff --git a/openshift-plugin/src/react-ui/App.tsx b/openshift-plugin/src/react-ui/App.tsx
+index fe8e3df..b090a71 100644
+--- a/openshift-plugin/src/react-ui/App.tsx
++++ b/openshift-plugin/src/react-ui/App.tsx
+@@ -4,12 +4,10 @@ import '@patternfly/react-core/dist/styles/base.css';
+ import Layout from './Layout';
+ import AIObservabilityPage from '../core/pages/AIObservabilityPage';
+ import { initializeRuntimeConfig } from '../core/services/runtimeConfig';
+-import { getGpuAvailability } from '../core/services/mcpClient';
+ 
+ const App: React.FC = () => {
+   const [configLoaded, setConfigLoaded] = React.useState(false);
+   const [activeTab, setActiveTab] = React.useState(0);
+-  const [gpuAvailable, setGpuAvailable] = React.useState<boolean | undefined>(undefined);
+ 
+   // Initialize runtime config on mount and wait for it to complete
+   React.useEffect(() => {
+@@ -27,16 +25,6 @@ const App: React.FC = () => {
+     loadConfig();
+   }, []);
+ 
+-  // Fetch GPU availability
+-  React.useEffect(() => {
+-    getGpuAvailability()
+-      .then(setGpuAvailable)
+-      .catch((error) => {
+-        console.error('Failed to check GPU availability:', error);
+-        setGpuAvailable(false); // Safe default on error
+-      });
+-  }, []);
+-
+   // Don't render until config is loaded to prevent race conditions
+   if (!configLoaded) {
+     return (
+@@ -56,7 +44,7 @@ const App: React.FC = () => {
+ 
+   return (
+     <Router>
+-      <Layout activeTab={activeTab} onTabChange={setActiveTab} gpuAvailable={gpuAvailable}>
++      <Layout activeTab={activeTab} onTabChange={setActiveTab}>
+         <Switch>
+           <Route exact path="/">
+             <AIObservabilityPage activeTab={activeTab} onTabChange={setActiveTab} />
+diff --git a/openshift-plugin/src/react-ui/Layout.tsx b/openshift-plugin/src/react-ui/Layout.tsx
+index 2f355e2..9e82170 100644
+--- a/openshift-plugin/src/react-ui/Layout.tsx
++++ b/openshift-plugin/src/react-ui/Layout.tsx
+@@ -18,10 +18,9 @@ interface LayoutProps {
+   children: React.ReactNode;
+   activeTab?: number;
+   onTabChange?: (tabIndex: number) => void;
+-  gpuAvailable?: boolean | undefined;
+ }
+ 
+-const Layout: React.FC<LayoutProps> = ({ children, activeTab = 0, onTabChange = () => {}, gpuAvailable }) => {
++const Layout: React.FC<LayoutProps> = ({ children, activeTab = 0, onTabChange = () => {} }) => {
+   const [isSidebarOpen, setIsSidebarOpen] = React.useState(true);
+ 
+   const onSidebarToggle = () => {
+@@ -42,7 +41,7 @@ const Layout: React.FC<LayoutProps> = ({ children, activeTab = 0, onTabChange =
+       <MastheadMain>
+         <MastheadBrand href="/">
+           <div style={{ color: 'white', fontSize: '20px', fontWeight: 'bold' }}>
+-            OpenShift AI Observability
++            OpenShift Observability
+           </div>
+         </MastheadBrand>
+       </MastheadMain>
+@@ -55,7 +54,7 @@ const Layout: React.FC<LayoutProps> = ({ children, activeTab = 0, onTabChange =
+   const Sidebar = (
+     <PageSidebar isSidebarOpen={isSidebarOpen}>
+       <PageSidebarBody>
+-        <Navigation activeTab={activeTab} onTabChange={onTabChange} gpuAvailable={gpuAvailable} />
++        <Navigation activeTab={activeTab} onTabChange={onTabChange} />
+       </PageSidebarBody>
+     </PageSidebar>
+   );
+diff --git a/openshift-plugin/src/react-ui/Navigation.tsx b/openshift-plugin/src/react-ui/Navigation.tsx
+index fe8284b..df0bb58 100644
+--- a/openshift-plugin/src/react-ui/Navigation.tsx
++++ b/openshift-plugin/src/react-ui/Navigation.tsx
+@@ -1,82 +1,11 @@
+ import * as React from 'react';
+ import { Nav, NavList, NavItem } from '@patternfly/react-core';
+-import {
+-  TachometerAltIcon,
+-  ServerIcon,
+-  CubeIcon,
+-  CubesIcon,
+-  CommentIcon,
+-} from '@patternfly/react-icons';
+-
+-interface NavigationProps {
+-  activeTab: number;
+-  onTabChange: (tabIndex: number) => void;
+-  gpuAvailable?: boolean | undefined;
+-}
+-
+-const Navigation: React.FC<NavigationProps> = ({ activeTab, onTabChange, gpuAvailable }) => {
+-  const allNavItems = [
+-    {
+-      id: 'overview',
+-      title: 'Overview',
+-      tabIndex: 0,
+-      icon: <TachometerAltIcon />,
+-      requiresGpu: false,
+-    },
+-    {
+-      id: 'vllm',
+-      title: 'vLLM Metrics',
+-      tabIndex: 1,
+-      icon: <ServerIcon />,
+-      requiresGpu: true,
+-    },
+-    {
+-      id: 'devices',
+-      title: 'Hardware Accelerators',
+-      tabIndex: 2,
+-      icon: <CubeIcon />,
+-      requiresGpu: true,
+-    },
+-    {
+-      id: 'openshift',
+-      title: 'OpenShift',
+-      tabIndex: 3,
+-      icon: <CubesIcon />,
+-      requiresGpu: false,
+-    },
+-    {
+-      id: 'chat',
+-      title: 'Chat with Prometheus',
+-      tabIndex: 4,
+-      icon: <CommentIcon />,
+-      requiresGpu: false,
+-    },
+-  ];
+-
+-  // Filter out GPU-related tabs when GPU is not available
+-  const navItems = gpuAvailable === true
+-    ? allNavItems
+-    : allNavItems.filter(item => !item.requiresGpu);
+-
+-  return (
+-    <Nav aria-label="AI Observability Navigation" theme="dark">
+-      <NavList>
+-        {navItems.map((item) => (
+-          <NavItem
+-            key={item.id}
+-            itemId={item.id}
+-            isActive={activeTab === item.tabIndex}
+-            onClick={() => onTabChange(item.tabIndex)}
+-          >
+-            {item.icon && (
+-              <span style={{ marginRight: '8px' }}>{item.icon}</span>
+-            )}
+-            {item.title}
+-          </NavItem>
+-        ))}
+-      </NavList>
+-    </Nav>
+-  );
+-};
+-
++import { CubesIcon, CommentIcon } from '@patternfly/react-icons';
++interface NavigationProps { activeTab: number; onTabChange: (tabIndex: number) => void; }
++const Navigation: React.FC<NavigationProps> = ({ activeTab, onTabChange }) => (
++  <Nav aria-label="OpenShift Observability Navigation" theme="dark"><NavList>
++    <NavItem itemId="openshift-metrics" isActive={activeTab === 0} onClick={() => onTabChange(0)}><span style={{ marginRight: '8px' }}><CubesIcon /></span>OpenShift Metrics</NavItem>
++    <NavItem itemId="chat" isActive={activeTab === 1} onClick={() => onTabChange(1)}><span style={{ marginRight: '8px' }}><CommentIcon /></span>Chat</NavItem>
++  </NavList></Nav>
++);
+ export default Navigation;
+diff --git a/src/chatbots/base.py b/src/chatbots/base.py
+index a58d14d..1e8ec27 100644
+--- a/src/chatbots/base.py
++++ b/src/chatbots/base.py
+@@ -586,7 +586,7 @@ class BaseChatBot(ABC):
+ You have access to monitoring tools and should provide focused, targeted responses.
+ 
+ **Your Environment:**
+-- Cluster: OpenShift with AI/ML workloads, GPUs, and comprehensive monitoring
++- Cluster: OpenShift with cluster and workload monitoring
+ - Scope: {self._format_scope_line(namespace)}
+ - Tools: Direct access to Prometheus/Thanos metrics via MCP tools
+ {self._format_namespace_directive(namespace)}
+@@ -604,58 +604,18 @@ You have access to monitoring tools and should provide focused, targeted respons
+ - **get_metrics_categories**: Get all metric categories with summary (NEW - use for exploring available metrics by category)
+ - **search_metrics_by_category**: Search metrics filtered by category and priority (NEW - use for targeted category-specific queries)
+ 
+-**Trace Analysis Tools:**
+-- chat_tempo_tool: Conversational trace analysis - use for trace/span/latency/request flow questions
+-- query_tempo_tool: Direct tempo queries for specific trace searches
+-- get_trace_details_tool: Get detailed information about specific trace IDs
++**Note:** This deployment provides OpenShift metrics, Prometheus queries, chat, and external MaaS configuration tools.
+ 
+-**Log Analysis Tools:**
+-- get_correlated_logs: Fetch application and infrastructure logs for a namespace or pod. Use for: "show me logs", "error logs in namespace X", "what's happening in pod Y", crash investigation, log search by severity. Requires namespace; pod is optional.
+-
+-**Correlation & Advanced Analysis:**
+-- korrel8r_get_correlated: Get correlated observability data across domains (find logs/traces/metrics related to alerts) - available if Korrel8r is configured. Preferred over korrel8r_query_objects (for investigation and correlation).
+-- korrel8r_query_objects: Query for specific observability objects (alerts, logs, traces, metrics) - available if Korrel8r is configured. Use for direct data access only.
+-
+-**Note:** Additional specialized tools are available for specific use cases (VLLM metrics, OpenShift analysis, model management, etc.) and will be provided to you automatically via the function calling interface when needed.
+-
+-**🚨 CRITICAL: Tool Selection Guidelines:**
+-
+-**For Trace-Related Questions (trace, span, latency, request flow, distributed tracing, performance):**
+-- Use `chat_tempo_tool` for conversational trace analysis with natural language questions
+-- Use `query_tempo_tool` for specific trace queries when you need targeted data
+-- Use `get_trace_details_tool` for detailed analysis of specific trace IDs
+-- Extract time ranges from natural language ("last 24 hours", "yesterday", "last week")
+-
+-**For Alert Queries:**
+-
+-**Smart Two-Phase Approach:**
+-- Start with Prometheus (fast, simple) for basic alert data
+-- Escalate to Korrel8r only when needed for correlation or explicitly requested
+-
+-**1. USER EXPLICITLY REQUESTS KORREL8r ("use korrel8r", "query korrel8r")**:
+-   - ALWAYS use Korrel8r tools immediately (korrel8r_query_objects or korrel8r_get_correlated)
+-   - Query format: `alert:alert:{{\"alertname\":\"AlertName\"}}`
+-   - Examples: "Use korrel8r to investigate AlertExampleDown", "Query korrel8r for HighCPU alert"
+-
+-**2. USER ASKS FOR INVESTIGATION/CORRELATION** (without mentioning korrel8r):
+-   - Phase 1: Use `execute_promql` with ALERTS metric to get alert details
+-   - Phase 2: Use Korrel8r to find related logs/traces/metrics
+-   - Examples: "Investigate AlertExampleDown", "What's related to HighCPU alert?", "Find correlated data for alert X"
+-
+-**3. BASIC ALERT QUERIES** (listing/checking status only):
+-   - Use ONLY `execute_promql` with the `ALERTS` metric - DO NOT use Korrel8r
+-   - Query firing alerts: `ALERTS{{alertstate="firing"}}`
+-   - Query specific alerts: `ALERTS{{alertstate="firing", alertname="HighCPU"}}`
+-   - Examples: "Any alerts firing?", "Show me alerts", "List all critical alerts", "Check alert status"
+-
+-**For Log Queries (logs, errors, pod output, crash investigation, "what happened"):**
+-- Use `get_correlated_logs` for namespace/pod log retrieval — pass the namespace (required) and optionally a pod name
+-- Use `korrel8r_get_correlated` when you need to correlate logs with traces and metrics (cross-signal investigation)
+-- Examples: "Show me logs for namespace llm-serving", "Error logs from pod vllm-predictor", "What happened in namespace gpu-workloads?", "Show me crash logs"
++**Tool Selection:**
++- Discover supported metrics with `search_metrics` or `search_metrics_by_category` before PromQL.
++- Use `execute_promql` for current and historical metric data.
++- Use `ALERTS` for alert status and Kubernetes status metrics for pod failures.
++- Stay within OpenShift cluster and workload observability; logs, traces, accelerators,
++  and model-serving metrics are not enabled in this profile.
+ 
+ **Your Intelligence Style:**
+ 1. **Rich Contextual Analysis**: Provide context, thresholds, and implications — not just raw numbers
+-2. **Intelligent Grouping**: Group related pods by function (AI/ML Stack, Infrastructure, Data Storage) with counts
++2. **Intelligent Grouping**: Group related pods by workload and infrastructure with counts
+ 3. **Operational Intelligence**: Include health assessments, trend context, and actionable recommendations
+ 
+ **CORE PRINCIPLES:**
+@@ -663,18 +623,16 @@ You have access to monitoring tools and should provide focused, targeted respons
+ - Be thorough but focused — answer what was asked, nothing more
+ - STOP when you have enough data to answer the question well
+ 
+-**vLLM / Model-Serving Metrics:**
+-Use `search_metrics_by_category` with category `gpu_ai` to discover exact metric names.
+-Key metrics (DO NOT guess names — always search first):
+-- Latency: `vllm:e2e_request_latency_seconds`, `vllm:time_to_first_token_seconds`
+-- Throughput: `vllm:prompt_tokens_total`, `vllm:generation_tokens_total`, `vllm:num_requests_total`
+-- Cache: `vllm:gpu_cache_usage_perc`, `vllm:cpu_cache_usage_perc`
+-- GPU: `DCGM_FI_DEV_GPU_TEMP`, `DCGM_FI_DEV_POWER_USAGE`, `DCGM_FI_DEV_GPU_UTIL`
+-When the user specifies a time range (e.g., "last 24 hours", "2.3 hours", "past 5 hours"), call `convert_time_to_promql_duration` to get the correct PromQL duration for query time windows.
++**OpenShift Metrics:**
++Use the OpenShift metric catalog to discover exact CPU, memory, pod, node, workload,
++control-plane, storage, and networking metric names before querying. GPU, accelerator,
++and model-serving metric families are outside this deployment's scope.
++When the user specifies a time range, call `convert_time_to_promql_duration` before
++constructing queries with decimal time values.
+ 
+ **Tool Selection Rules (ALWAYS follow these):**
+ - Traces/spans/latency → `chat_tempo_tool` (search) or `get_trace_details_tool` (by ID)
+-- Metrics/pods/GPU/CPU/memory → **ALWAYS** call `search_metrics` or `search_metrics_by_category` FIRST to discover exact metric names, THEN call `execute_promql` with the discovered names
++- Metrics/pods/CPU/memory → **ALWAYS** call `search_metrics` or `search_metrics_by_category` FIRST to discover exact metric names, THEN call `execute_promql` with the discovered names
+ - Alerts → `execute_promql` with `ALERTS{{alertstate="firing"}}` metric
+ - Logs/errors/pod output → `get_correlated_logs` with namespace and optional pod
+ - Correlation/investigation/korrel8r → `korrel8r_get_correlated` with goals and k8s query
+@@ -682,10 +640,9 @@ When the user specifies a time range (e.g., "last 24 hours", "2.3 hours", "past
+ - When the user explicitly names a tool (e.g., "use korrel8r"), ALWAYS use that tool
+ 
+ **Your Workflow:**
+-1. **Determine** what the user is asking for (trace, metrics, logs, or alerts?)
+-2. **Discover** — for metrics questions, ALWAYS call `search_metrics` or `search_metrics_by_category` first
+-3. **Execute** the query tool with the discovered metric names
+-4. **Answer** with the specific data — DONE!
++1. Determine which supported OpenShift metric the question needs.
++2. Discover it with `search_metrics` or `search_metrics_by_category`.
++3. Execute PromQL with the discovered name, then answer from the returned data.
+ 
+ **CRITICAL: Interpreting Metrics Correctly**
+ - **Boolean/Status Metrics**: These use VALUE to indicate state where 1 means TRUE and 0 means FALSE
+@@ -695,10 +652,10 @@ When the user specifies a time range (e.g., "last 24 hours", "2.3 hours", "past
+ - **Counter Metrics**: Always increasing, use rate function for meaningful analysis
+ 
+ **CRITICAL: Always Group Metrics for Detailed Breakdowns**
+-- **Always use grouping by pod and namespace** for resource metrics like CPU memory GPU
++- **Always use grouping by pod and namespace** for resource metrics like CPU and memory
+ - **Show detailed breakdowns** not just summary totals
+ - List top consumers by pod and namespace with actual names
+-- Categorize by workload type such as AI/ML versus Infrastructure
++- Categorize by workload type such as workload versus Infrastructure
+ 
+ **Pod Health & Failure Detection:**
+ - `kube_pod_status_phase` only tracks pod-level phases — most failures (CrashLoopBackOff, ImagePullBackOff, OOMKilled) are NOT in "Failed" phase
+diff --git a/src/chatbots/openai_bot.py b/src/chatbots/openai_bot.py
+index c2a30e9..6f63071 100644
+--- a/src/chatbots/openai_bot.py
++++ b/src/chatbots/openai_bot.py
+@@ -96,22 +96,17 @@ class OpenAIChatBot(BaseChatBot):
+ 
+ **MANDATORY — Metric Discovery Before Queries:**
+ You MUST call `search_metrics` or `search_metrics_by_category` BEFORE calling
+-`execute_promql`. NEVER guess metric names — they are non-obvious
+-(e.g., `vllm:gpu_cache_usage_perc` not `vllm:kv_cache_usage_percentage`,
+-`DCGM_FI_DEV_GPU_TEMP` not `DCGM_FI_DEV_TEMP`).
++`execute_promql`. NEVER guess metric names; discover supported OpenShift metric names first.
+ 
+ **CRITICAL — ALWAYS Execute Queries, NEVER Just Show Them:**
+ When you construct a PromQL query, you MUST immediately call `execute_promql` to run it
+ and get the actual data. NEVER show the query to the user without executing it first.
+ 
+ Correct flow:
+-1. `search_metrics("GPU temperature")` → discover `DCGM_FI_DEV_GPU_TEMP`
+-2. `execute_promql("avg(DCGM_FI_DEV_GPU_TEMP) by (pod)")` → get actual data
+-3. Present the results to the user
++1. Search the OpenShift metric catalog for the requested metric
++2. Execute PromQL with the discovered OpenShift metric name
++3. Present the returned data to the user
+ 
+-Wrong flow (DO NOT DO THIS):
+-1. `search_metrics("GPU temperature")` → discover `DCGM_FI_DEV_GPU_TEMP`
+-2. Tell the user "Here's the PromQL query: avg(DCGM_FI_DEV_GPU_TEMP) by (pod)" ❌ WRONG - you must EXECUTE it!
+ 
+ **Best Practices:**
+ - Provide detailed breakdowns by pod and namespace
+diff --git a/src/core/chat_with_prometheus.py b/src/core/chat_with_prometheus.py
+index 38efc51..7249421 100644
+--- a/src/core/chat_with_prometheus.py
++++ b/src/core/chat_with_prometheus.py
+@@ -24,6 +24,7 @@ from .metrics import choose_prometheus_step
+ from .response_validator import ResponseType
+ from .metrics_catalog import get_metrics_catalog
+ from .time_utils import parse_duration_to_timedelta
++from .metric_scope import is_excluded_metric_name, is_excluded_query
+ 
+ # Initialize logger
+ logger = logging.getLogger(__name__)
+@@ -74,7 +75,7 @@ def search_metrics_by_pattern(pattern: str = "", limit: int = 50) -> Dict[str, A
+     """
+     # Get all metric names
+     response = make_prometheus_request("/api/v1/label/__name__/values")
+-    all_metrics = response.get("data", [])
++    all_metrics = [name for name in response.get("data", []) if not is_excluded_metric_name(name)]
+     
+     # Use semantic search if pattern provided
+     if pattern:
+@@ -135,6 +136,9 @@ def get_metric_metadata(metric_name: str) -> Dict[str, Any]:
+     Returns:
+         Detailed metadata including type, help text, unit, and available labels
+     """
++    if is_excluded_metric_name(metric_name):
++        raise ValueError("GPU, accelerator, and vLLM metric families are outside this deployment's scope")
++
+     # Get metric metadata
+     metadata_response = make_prometheus_request(
+         "/api/v1/metadata", 
+@@ -180,6 +184,8 @@ def get_label_values(metric_name: str, label_name: str) -> Dict[str, Any]:
+     Returns:
+         Dict with metric_name, label_name, and values list
+     """
++    if is_excluded_metric_name(metric_name):
++        raise ValueError("GPU, accelerator, and vLLM metric families are outside this deployment's scope")
+     response = make_prometheus_request(f"/api/v1/label/{label_name}/values")
+     values = response.get("data", [])
+     
+@@ -210,6 +216,9 @@ def execute_promql_query(
+     Returns:
+         Structured query results with metadata
+     """
++    if is_excluded_query(query):
++        raise ValueError("GPU, accelerator, and vLLM metric families are outside this deployment's scope")
++
+     # Parse time parameters
+     if start_time:
+         if start_time.endswith(('m', 'h', 'd')):
+@@ -253,7 +262,10 @@ def execute_promql_query(
+         "end_time": end_time or f"{int(datetime.utcnow().timestamp())}",
+         "status": response.get("status"),
+         "result_type": response.get("data", {}).get("resultType"),
+-        "results": response.get("data", {}).get("result", []),
++        "results": [
++            series for series in response.get("data", {}).get("result", [])
++            if not is_excluded_metric_name(series.get("metric", {}).get("__name__", ""))
++        ],
+         "execution_time": response.get("data", {}).get("stats", {}).get("timings", {}).get("evalTotalTime", "unknown")
+     }
+ 
+diff --git a/src/core/metric_scope.py b/src/core/metric_scope.py
+new file mode 100644
+index 0000000..06ae2ed
+--- /dev/null
++++ b/src/core/metric_scope.py
+@@ -0,0 +1,39 @@
++"""Standalone OpenShift metrics scope: exclude GPU and model-serving families."""
++import re
++
++_EXCLUDED_METRIC = re.compile(
++    r"(?:^|[^a-z0-9])(?:vllm|dcgm|gpu|nvidia|habanalabs|habana|gaudi|rocm|amd_smi|accelerator|"
++    r"xpu|cuda|nvml|amdgpu)(?:$|[^a-z0-9])",
++    re.IGNORECASE,
++)
++
++
++def is_excluded_metric_name(name: str) -> bool:
++    return bool(name and _EXCLUDED_METRIC.search(name))
++
++
++def is_excluded_query(query: str) -> bool:
++    """Return true when a PromQL expression names or broadly selects excluded families."""
++    source = query or ""
++    selectors = re.findall(r"__name__\s*(=~|=)\s*(['\"])(.*?)\2", source)
++    for operator, _quote, value in selectors:
++        if operator == "=~" or is_excluded_metric_name(value):
++            return True
++    without_strings = re.sub(r"(['\"]).*?\1", " ", source)
++    identifiers = re.findall(r"[A-Za-z_:][A-Za-z0-9_:]*", without_strings)
++    return any(is_excluded_metric_name(token) for token in identifiers)
++
++
++def filter_metric_map(metrics: dict) -> dict:
++    """Copy metric groups while dropping excluded categories and query families."""
++    filtered = {}
++    for category, entries in (metrics or {}).items():
++        if is_excluded_metric_name(category) or not isinstance(entries, dict):
++            continue
++        safe_entries = {
++            label: query for label, query in entries.items()
++            if not is_excluded_metric_name(str(label)) and not is_excluded_query(str(query))
++        }
++        if safe_entries:
++            filtered[category] = safe_entries
++    return filtered
+diff --git a/src/core/metrics.py b/src/core/metrics.py
+index 3236bb0..f3699ab 100644
+--- a/src/core/metrics.py
++++ b/src/core/metrics.py
+@@ -25,6 +25,7 @@ get_python_logger()
+ logger = logging.getLogger(__name__)
+ 
+ from .config import PROMETHEUS_URL, THANOS_TOKEN, VERIFY_SSL
++from .metric_scope import filter_metric_map, is_excluded_query
+ from .llm_client import summarize_with_llm
+ from .response_validator import ResponseType
+ from .llm_client import (
+@@ -196,6 +197,8 @@ def execute_instant_query(query: str, timeout: int = 10) -> Dict[str, Any]:
+     Returns:
+         Dict with 'data' containing query results
+     """
++    if is_excluded_query(query):
++        raise ValueError("GPU, accelerator, and vLLM metric families are outside this deployment's scope")
+     headers = _auth_headers()
+     try:
+         resp = requests.get(
+@@ -1397,8 +1400,8 @@ def discover_vllm_metrics():
+ 
+ 
+ def discover_openshift_metrics():
+-    """Return comprehensive OpenShift/Kubernetes metrics organized by category"""
+-    return {
++    """Return standalone OpenShift/Kubernetes metrics, excluding accelerators."""
++    metrics = {
+         # ========== CLUSTER-WIDE CATEGORIES ==========
+         "Fleet Overview": {
+             # Core cluster-wide metrics
+@@ -1579,7 +1582,8 @@ def discover_openshift_metrics():
+             "Active Connections": "sum(nginx_ingress_controller_nginx_process_connections)",
+             "Ingress Request Rate": "sum(rate(nginx_ingress_controller_requests[5m]))",
+         },
+-    } 
++    }
++    return filter_metric_map(metrics)
+ 
+ 
+ # Cache discovered metrics to avoid repeated API calls
+diff --git a/src/core/metrics_catalog.py b/src/core/metrics_catalog.py
+index 18aa6f2..a6eb716 100644
+--- a/src/core/metrics_catalog.py
++++ b/src/core/metrics_catalog.py
+@@ -18,6 +18,7 @@ from typing import Dict, List, Optional, Set
+ from dataclasses import dataclass
+ 
+ from .config import DISCOVERY_TIMEOUT_SECONDS, PROMETHEUS_URL, VERIFY_SSL, THANOS_TOKEN
++from .metric_scope import is_excluded_metric_name
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -89,7 +90,7 @@ class MetricsCatalog:
+ 
+         # GPU discovery settings
+         self._prometheus_url = prometheus_url or PROMETHEUS_URL
+-        self._enable_gpu_discovery = enable_gpu_discovery
++        self._enable_gpu_discovery = False  # Standalone profile never discovers accelerator metrics
+         self._gpu_discovery_timeout = gpu_discovery_timeout
+ 
+         # GPU discovery state
+@@ -150,7 +151,21 @@ class MetricsCatalog:
+ 
+                 # Extract components
+                 self._lookup = self._catalog.get("lookup", {})
+-                self._categories = self._catalog.get("categories", [])
++                self._categories = [
++                    category for category in self._catalog.get("categories", [])
++                    if category.get("id") != "gpu_ai"
++                ]
++                for category in self._categories:
++                    for priority in ("High", "Medium"):
++                        category.setdefault("metrics", {})[priority] = [
++                            metric for metric in category["metrics"].get(priority, [])
++                            if not is_excluded_metric_name(metric.get("name", ""))
++                        ]
++                self._lookup = {
++                    name: entry for name, entry in self._lookup.items()
++                    if not is_excluded_metric_name(name)
++                    and entry.get("category_id") != "gpu_ai"
++                }
+ 
+                 # Log stats
+                 metadata = self._catalog.get("metadata", {})
+@@ -350,6 +365,8 @@ class MetricsCatalog:
+             # --- Add metrics found in Prometheus ---
+             added_by_cat: Dict[str, List[Dict]] = {}
+             for entry in result.metrics_added:
++                if entry.get("category_id") == "gpu_ai" or is_excluded_metric_name(entry.get("name", "")):
++                    continue
+                 added_by_cat.setdefault(entry["category_id"], []).append(entry)
+ 
+             for cat in self._categories:
+@@ -376,8 +393,13 @@ class MetricsCatalog:
+                 self._catalog["metadata"]["validation_removed"] = len(result.metrics_removed)
+                 self._catalog["metadata"]["validation_added"] = len(result.metrics_added)
+                 current_total = self._catalog["metadata"].get("total_metrics", 0)
+-                self._catalog["metadata"]["total_metrics"] = (
+-                    current_total - len(result.metrics_removed) + len(result.metrics_added)
++                accepted_additions = sum(
++                    1 for entry in result.metrics_added
++                    if entry.get("category_id") != "gpu_ai"
++                    and not is_excluded_metric_name(entry.get("name", ""))
++                )
++                self._catalog["metadata"]["total_metrics"] = max(
++                    0, current_total - len(result.metrics_removed) + accepted_additions
+                 )
+ 
+     def is_available(self) -> bool:
+@@ -556,6 +578,9 @@ class MetricsCatalog:
+         if not self._load_catalog():
+             return None
+ 
++        if is_excluded_metric_name(metric_name):
++            return None
++
+         # Lookup category and priority
+         lookup_entry = self._lookup.get(metric_name)
+         if not lookup_entry:
+@@ -599,18 +624,6 @@ class MetricsCatalog:
+ 
+         # Category keyword mapping — IDs must match the catalog JSON exactly
+         category_keywords = {
+-            "gpu_ai": [
+-                "gpu", "nvidia", "cuda", "dcgm",  # NVIDIA
+-                "gaudi", "habana", "intel", "xpu",  # Intel
+-                "amd", "rocm", "amdgpu",  # AMD
+-                "accelerator", "vllm", "inference",  # General AI/ML
+-                "ttft", "tpot", "itl", "kv cache", "prefix cache",  # vLLM abbreviations
+-                "preemption", "tokens per second", "model serving",  # vLLM concepts
+-                "decode", "prefill", "queue time",  # Latency phases
+-                "generation tokens", "prompt tokens",  # Token throughput
+-                "llm", "serving", "e2e latency",  # Model serving
+-                "first token", "cache hit", "cache usage",  # Cache & latency
+-            ],
+             "cluster_health": ["cluster", "capacity", "quota", "resource"],
+             "node_hardware": ["node", "cpu", "memory", "disk", "hardware"],
+             "pod_container": ["pod", "container", "restart", "oom", "deploy"],
+diff --git a/src/mcp_server/observability_mcp.py b/src/mcp_server/observability_mcp.py
+index bcf21f5..1596d55 100644
+--- a/src/mcp_server/observability_mcp.py
++++ b/src/mcp_server/observability_mcp.py
+@@ -25,18 +25,12 @@ class ObservabilityMCPServer:
+         logging.getLogger(__name__).info("Observability MCP Server initialized")
+ 
+     def _register_mcp_tools(self) -> None:
+-        from .tools.observability_vllm_tools import (
+-            list_models,
+-            list_vllm_namespaces,
++        from .tools.model_config_tools import (
+             get_model_config,
+-            get_vllm_metrics_tool,
+-            fetch_vllm_metrics_data,
+-            analyze_vllm,
+-            calculate_metrics,
+             list_summarization_models,
+-            get_gpu_info,
+-            get_deployment_info,
+-            chat_vllm,
++            list_provider_models,
++            add_model_to_config,
++            update_maas_model_api_key,
+         )
+         from .tools.observability_openshift_tools import (
+             analyze_openshift,
+@@ -61,31 +55,9 @@ class ObservabilityMCPServer:
+             get_category_metrics_detail,      # Get category catalog JSON for UI
+             convert_time_to_promql_duration,  # Time conversion helper
+         )
+-        from .tools.tempo_tools import (
+-            query_tempo_tool,
+-            get_trace_details_tool,
+-            chat_tempo_tool
+-        )
+         from .tools.chat_tool import chat
+         from .tools.credentials_tools import validate_api_key, save_api_key, check_provider_secret, delete_provider_secret
+-        from .tools.model_config_tools import (
+-            list_provider_models,
+-            add_model_to_config,
+-            update_maas_model_api_key,
+-        )
+ 
+-        # Register vLLM tools
+-        self.mcp.tool()(list_models)
+-        self.mcp.tool()(list_vllm_namespaces)
+-        self.mcp.tool()(get_model_config)
+-        self.mcp.tool()(get_vllm_metrics_tool)
+-        self.mcp.tool()(fetch_vllm_metrics_data)
+-        self.mcp.tool()(analyze_vllm)
+-        self.mcp.tool()(calculate_metrics)
+-        self.mcp.tool()(list_summarization_models)
+-        self.mcp.tool()(get_gpu_info)
+-        self.mcp.tool()(get_deployment_info)
+-        self.mcp.tool()(chat_vllm)
+ 
+         # Register OpenShift tools
+         self.mcp.tool()(analyze_openshift)
+@@ -110,28 +82,15 @@ class ObservabilityMCPServer:
+         self.mcp.tool()(get_category_metrics_detail)      # Get category catalog JSON for UI
+         self.mcp.tool()(convert_time_to_promql_duration)  # Time conversion helper
+ 
+-        # Register Tempo query tools
+-        self.mcp.tool()(query_tempo_tool)
+-        self.mcp.tool()(get_trace_details_tool)
+-        self.mcp.tool()(chat_tempo_tool)
+-
+-        # Register Korrel8r tools
+-        from .tools.korrel8r_tools import (
+-            korrel8r_query_objects,
+-            korrel8r_get_correlated,
+-            get_correlated_logs,
+-        )
+-        self.mcp.tool()(korrel8r_query_objects)
+-        self.mcp.tool()(korrel8r_get_correlated)
+-        self.mcp.tool()(get_correlated_logs)
+-
+         self.mcp.tool()(chat)
+         self.mcp.tool()(validate_api_key)
+         self.mcp.tool()(save_api_key)
+         self.mcp.tool()(check_provider_secret)
+         self.mcp.tool()(delete_provider_secret)
+ 
+-        # Register model config tools
++        # Register external MaaS model configuration and listing tools.
++        self.mcp.tool()(get_model_config)
++        self.mcp.tool()(list_summarization_models)
+         self.mcp.tool()(list_provider_models)
+         self.mcp.tool()(add_model_to_config)
+         self.mcp.tool()(update_maas_model_api_key)
+diff --git a/src/mcp_server/tools/model_config_tools.py b/src/mcp_server/tools/model_config_tools.py
+index 3506ebc..de10976 100644
+--- a/src/mcp_server/tools/model_config_tools.py
++++ b/src/mcp_server/tools/model_config_tools.py
+@@ -205,6 +205,38 @@ def _save_maas_model_api_key(secret_field: str, api_key: str) -> Dict[str, Any]:
+         return {"success": False, "error": f"Failed to save API key: {str(e)}"}
+ 
+ 
++
++def get_model_config() -> List[Dict[str, Any]]:
++    """Return configured models, including externally managed MaaS models."""
++    try:
++        from core.model_config_manager import get_model_config as load_model_config
++        return make_mcp_text_response(json.dumps(load_model_config()))
++    except Exception as exc:
++        logger.warning("Could not read model configuration: %s", exc)
++        return make_mcp_text_response(json.dumps({}))
++
++
++def list_summarization_models() -> List[Dict[str, Any]]:
++    """Return model metadata used by the console settings interface."""
++    try:
++        from core.model_config_manager import get_model_config as load_model_config
++        config = load_model_config()
++        models = []
++        for name, entry in config.items():
++            models.append({
++                "name": name,
++                "external": entry.get("external", True),
++                "requiresApiKey": entry.get("requiresApiKey", True),
++                "provider": entry.get("provider", "unknown"),
++                "modelName": entry.get("modelName", name),
++                **({"serviceName": entry["serviceName"]} if "serviceName" in entry else {}),
++                **({"description": entry["description"]} if "description" in entry else {}),
++            })
++        return make_mcp_text_response(json.dumps({"models": models}))
++    except Exception as exc:
++        logger.warning("Could not list summarization models: %s", exc)
++        return make_mcp_text_response(json.dumps({"models": []}))
++
+ def list_provider_models(
+     provider: str,
+     api_key: Optional[str] = None
+diff --git a/src/mcp_server/tools/observability_openshift_tools.py b/src/mcp_server/tools/observability_openshift_tools.py
+index e1691b8..ebcf9b0 100644
+--- a/src/mcp_server/tools/observability_openshift_tools.py
++++ b/src/mcp_server/tools/observability_openshift_tools.py
+@@ -4,7 +4,7 @@ import json
+ import core.metrics as core_metrics
+ import requests
+ 
+-from .observability_vllm_tools import resolve_time_range
++from .time_range import resolve_time_range
+ from core.response_utils import make_mcp_text_response
+ from core.metrics import (
+     analyze_openshift_metrics,
+diff --git a/src/mcp_server/tools/time_range.py b/src/mcp_server/tools/time_range.py
+new file mode 100644
+index 0000000..4d333da
+--- /dev/null
++++ b/src/mcp_server/tools/time_range.py
+@@ -0,0 +1,31 @@
++"""Time range parsing shared by the standalone observability tool groups."""
++import logging
++from datetime import datetime
++from typing import Optional
++
++from core.config import DEFAULT_TIME_RANGE_DAYS
++from core.llm_client import extract_time_range_with_info
++
++logger = logging.getLogger(__name__)
++
++
++def resolve_time_range(
++    time_range: Optional[str] = None,
++    start_datetime: Optional[str] = None,
++    end_datetime: Optional[str] = None,
++) -> tuple[int, int]:
++    """Resolve natural language or ISO input to an epoch range."""
++    try:
++        if time_range:
++            start_ts, end_ts, _info = extract_time_range_with_info(time_range, None, None)
++            return start_ts, end_ts
++        if start_datetime and end_datetime:
++            start_ts = int(datetime.fromisoformat(start_datetime.replace("Z", "+00:00")).timestamp())
++            end_ts = int(datetime.fromisoformat(end_datetime.replace("Z", "+00:00")).timestamp())
++            return start_ts, end_ts
++        end_ts = int(datetime.utcnow().timestamp())
++        return end_ts - DEFAULT_TIME_RANGE_DAYS * 24 * 3600, end_ts
++    except Exception as exc:
++        logger.warning("Could not parse time range; using default: %s", exc)
++        end_ts = int(datetime.utcnow().timestamp())
++        return end_ts - DEFAULT_TIME_RANGE_DAYS * 24 * 3600, end_ts

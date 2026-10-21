@@ -1,0 +1,55 @@
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: aiobs-mcp-server
+  namespace: ai-observability-standalone
+spec:
+  lookupPolicy:
+    local: false
+---
+apiVersion: image.openshift.io/v1
+kind: ImageStream
+metadata:
+  name: aiobs-console-plugin
+  namespace: ai-observability-standalone
+spec:
+  lookupPolicy:
+    local: false
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: aiobs-mcp-server
+  namespace: ai-observability-standalone
+spec:
+  runPolicy: Serial
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: mcp_server/Dockerfile
+  output:
+    to:
+      kind: ImageStreamTag
+      name: aiobs-mcp-server:openshift-only-20261021
+---
+apiVersion: build.openshift.io/v1
+kind: BuildConfig
+metadata:
+  name: aiobs-console-plugin
+  namespace: ai-observability-standalone
+spec:
+  runPolicy: Serial
+  source:
+    type: Binary
+    binary: {}
+  strategy:
+    type: Docker
+    dockerStrategy:
+      dockerfilePath: Dockerfile.plugin
+  output:
+    to:
+      kind: ImageStreamTag
+      name: aiobs-console-plugin:openshift-only-20261021

@@ -1,0 +1,17 @@
+plugin:
+  name: aiobs-console-plugin
+  description: OpenShift Observability
+  image:
+    repository: image-registry.openshift-image-registry.svc:5000/ai-observability-standalone/aiobs-console-plugin
+    tag: openshift-only-20261021
+    digest: sha256:3141fe27a9ed65330431215c391199345f8cbd4f0630af72d46f9af26a740690
+  imagePullPolicy: IfNotPresent
+  jobs:
+    patchConsoles:
+      enabled: true
+      image: registry.redhat.io/openshift4/ose-tools-rhel9@sha256:ee65b244fc94d5765514c604dc0a288517dcdce68de65128d047622b6b30a618
+mcpServer:
+  enabled: true
+  serviceName: aiobs-mcp-server-svc
+  namespace: ai-observability-standalone
+  port: 8085

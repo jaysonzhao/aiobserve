@@ -1,0 +1,62 @@
+replicaCount: 1
+deployment:
+  name: aiobs-mcp-server
+image:
+  repository: image-registry.openshift-image-registry.svc:5000/ai-observability-standalone/aiobs-mcp-server
+  tag: openshift-only-20261021
+  digest: sha256:c533b9fbb2315128aa24ca811c1e3e1c8fbc887aa5044347677327681ad6a71d
+  pullPolicy: IfNotPresent
+service:
+  name: aiobs-mcp-server-svc
+  type: ClusterIP
+  port: 8085
+route:
+  name: aiobs-mcp-server-route
+  enabled: false
+tls:
+  enabled: false
+env:
+  MCP_HOST: "0.0.0.0"
+  MCP_PORT: 8085
+  MCP_TRANSPORT_PROTOCOL: http
+  PYTHON_LOG_LEVEL: INFO
+  DEV_MODE: "false"
+  PROMETHEUS_URL: https://thanos-querier.openshift-monitoring.svc.cluster.local:9091
+  MAX_TIME_RANGE_DAYS: 90
+  DEFAULT_TIME_RANGE_DAYS: 7
+  LLM_TIMEOUT_SECONDS: 180
+  MAAS_API_URL: http://maas.apps.cluster-v4vsc.v4vsc.sandbox287.opentlc.com/llm/gpt-oss-20b/v1
+llm:
+  url: ""
+  apiToken: ""
+modelConfig:
+  maas/gpt-oss-20b:
+    external: true
+    requiresApiKey: true
+    provider: maas
+    serviceName: null
+    apiUrl: http://maas.apps.cluster-v4vsc.v4vsc.sandbox287.opentlc.com/llm/gpt-oss-20b/v1/chat/completions
+    modelName: gpt-oss-20b
+    apiKeySecretField: gpt-oss-20b
+    cost:
+      prompt_rate: 0.0
+      output_rate: 0.0
+    _metadata:
+      source: user
+      description: GPT-OSS-20B MaaS; API key configured separately after secure transport is available
+trustedCA:
+  enabled: true
+  configMapName: aiobs-mcp-server-trusted-ca-bundle
+  create: false
+extraEnv:
+  - name: REQUESTS_CA_BUNDLE
+    value: /etc/pki/ca-trust/extracted/pem/ca-bundle.crt
+  - name: SSL_CERT_FILE
+    value: /etc/pki/ca-trust/extracted/pem/ca-bundle.crt
+rbac:
+  createGrafanaRole: false
+  bindOpenshiftClusterMonitoringView: false
+  bindKorrel8rView: false
+  bindLokiTenantLogs: false
+llamaStackConfig:
+  enabled: false
