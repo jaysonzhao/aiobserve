@@ -7,12 +7,14 @@ The attached runbook described OpenShift 4.20.39, while the supplied cluster rep
 ## Live deployment record
 
 - Helm releases `aiobs-mcp-server` and `aiobs-console-plugin` are `deployed`; both Deployments are 1/1 Ready.
+- The MCP Service requests an OpenShift serving certificate in Secret `aiobs-mcp-server-tls`; MCP TLS is enabled so the Console service proxy can securely reach it.
 - MCP image: `image-registry.openshift-image-registry.svc:5000/ai-observability-standalone/aiobs-mcp-server@sha256:c533b9fbb2315128aa24ca811c1e3e1c8fbc887aa5044347677327681ad6a71d`.
 - Console plugin image: `image-registry.openshift-image-registry.svc:5000/ai-observability-standalone/aiobs-console-plugin@sha256:3141fe27a9ed65330431215c391199345f8cbd4f0630af72d46f9af26a740690`.
 - The plugin manifest returned HTTP 200 from the plugin pod. The registration hook merged `aiobs-console-plugin` into the existing Console plugin list; the Console operator was Available and not Degraded.
 - The cluster reported one unrelated operator degradation: `cloud-credential` had 1 of 7 credential requests failing to sync. The Console operator remained Available and not Degraded.
 - The live MCP endpoint exposed 29 tools and none named for GPU, vLLM, Tempo or Korrel8r. Its catalog returned 18 categories and no GPU/accelerator category.
 - A verified in-pod Thanos query returned HTTP 200, Prometheus `success`, and live `up` series (including 245 running pods at validation time). MCP startup completed catalog validation against Thanos.
+- The first dashboard load had no metric values because the MCP backend was plain HTTP while the OpenShift Console service proxy connected over HTTPS. Enabling the chart's existing TLS support and the Service serving-certificate annotation fixed the proxy path. After refreshing `/observe/ai-observability`, Fleet Overview displayed live values (245 running pods, 5 nodes, CPU 6.57%, memory 24.24% at verification time); MCP logs showed successful console-proxy `/config` and `/mcp` requests.
 - Image builds used OpenShift Binary BuildConfigs. Temporary BuildConfigs and Build objects were removed after the builds; ImageStreams remain because the Deployments use their images.
 
 The configured MaaS URL is `http://maas.apps.cluster-v4vsc.v4vsc.sandbox287.opentlc.com/llm/gpt-oss-20b`. Its model ID and API compatibility remain configuration assumptions: no MaaS request was sent and no MaaS Secret was created. The API key stays pending until a protected HTTPS endpoint or another protected transport is available. OpenShift metrics passed. MaaS-backed chat, summaries and exports remain unaccepted until protected transport and the API key are available.
@@ -51,7 +53,7 @@ oc start-build aiobs-console-plugin -n "$NS" --from-dir="$workdir" --follow
 rm -rf "$workdir"
 ```
 
-The skill documents the cluster preflight, service-CA plus public-root bundle, server-side dry-runs, individual chart deployment, live validation, MaaS key handling, access limits, troubleshooting and rollback. Use the configured trust bundle name in `values-mcp.yaml`; do not commit a cluster CA bundle or credential.
+The skill documents the cluster preflight, service-CA plus public-root bundle, server-side dry-runs, individual chart deployment, live validation, MaaS key handling, access limits, troubleshooting and rollback. Use the configured trust bundle name in `values-mcp.yaml`; do not commit a cluster CA bundle or credential. Keep `tls.enabled: true` for the MCP Service behind the Console proxy; the service-serving certificate is issued into the configured Secret.
 
 After creating the namespace and the combined trusted CA ConfigMap described in the skill, deploy the charts:
 

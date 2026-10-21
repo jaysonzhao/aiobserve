@@ -14,7 +14,9 @@ route:
   name: aiobs-mcp-server-route
   enabled: false
 tls:
-  enabled: false
+  enabled: true
+  secretName: aiobs-mcp-server-tls
+  serviceCertAnnotation: service.beta.openshift.io/serving-cert-secret-name
 env:
   MCP_HOST: "0.0.0.0"
   MCP_PORT: 8085

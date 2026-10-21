@@ -244,6 +244,10 @@ env:
   LLM_TIMEOUT_SECONDS: 180
 route:
   enabled: false
+tls:
+  enabled: true
+  secretName: aiobs-mcp-server-tls
+  serviceCertAnnotation: service.beta.openshift.io/serving-cert-secret-name
 trustedCA:
   enabled: true
   create: false
@@ -302,7 +306,7 @@ print('PASS: local cluster metrics are queryable without a MaaS API key')
 PYMETRICS
 ```
 
-Confirm the UI displays real CPU/memory/pod metrics and contains no vLLM, GPU, accelerator tabs/cards or accelerator-unavailable banner. Mark chat, AI summaries and AI-generated reports as pending while the key is missing. After configuring the key in section 3, run the following through `oc -n "$NS" exec -i deploy/aiobs-mcp-server -- python -`; it prints no credentials:
+Open `/observe/ai-observability` in the OpenShift Console and confirm Fleet Overview and Node Metrics display numeric values, with no vLLM, GPU, accelerator tabs/cards or accelerator-unavailable banner. A direct Thanos/MCP query does not verify the Console proxy path. The Console proxy connects to the MCP Service over HTTPS: keep `tls.enabled: true`, use the Service serving-certificate annotation and mounted Secret, and confirm the Secret has been issued. If the cards show em dashes or “No metrics data available,” inspect Console and MCP logs for TLS handshake errors, then confirm Console proxy `/config` and `/mcp` requests reach MCP successfully. Mark chat, AI summaries and AI-generated reports as pending while the key is missing. After configuring the key in section 3, run the following through `oc -n "$NS" exec -i deploy/aiobs-mcp-server -- python -`; it prints no credentials:
 
 ```python
 import base64, json, os, requests
@@ -439,6 +443,7 @@ Require these evidence items in the execution report:
 | `404` on model calls | Compare served model ID; check doubled/missing `/v1` and completion suffix |
 | `401/403` model calls | Verify API key/subscription expiry and endpoint auth; distinguish model credentials from SA tokens |
 | CA verification failure | Verify full bundle, SAN/hostname, Requests + SDK CA settings; avoid `-k` as a deployment fix |
+| Dashboard cards show em dashes or no metrics | Confirm MCP TLS is enabled, the Service has the OpenShift serving-certificate annotation and its Secret is populated; check Console/MCP logs for TLS handshake errors and verify proxied `/config` and `/mcp` requests |
 | Prometheus `403` | Check `mcp-analyzer` role bindings and actual API authorization, not only pod readiness |
 | Old vLLM/GPU content remains | Verify both custom image digests, applied source patch, scoped catalog and browser asset refresh; do not enable accelerator exporters |
 | Trace `403` | Bind the actual tenant read role and match gateway tenant path |
