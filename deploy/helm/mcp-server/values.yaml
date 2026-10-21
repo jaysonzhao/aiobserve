@@ -10,6 +10,8 @@ deployment:
 image:
   repository: quay.io/ecosystem-appeng/aiobs-mcp-server
   tag: v3.2.0
+  # Optional immutable image digest; when set, deployment uses repository@digest.
+  digest: ""
   pullPolicy: IfNotPresent
 
 service:
@@ -87,11 +89,18 @@ llm:
 trustedCA:
   enabled: true
   configMapName: "aiobs-mcp-server-trusted-ca-bundle"  # Fixed name
+  create: true
+
+# Additional environment entries for site-specific client trust settings.
+extraEnv: []
 
 # RBAC setup similar to metrics-api
 rbac:
   # Creates a ClusterRole with access to Prometheus and Alertmanager APIs
   createGrafanaRole: true
+  # Optional bindings for telemetry components that are not installed in every profile.
+  bindKorrel8rView: true
+  bindLokiTenantLogs: true
   # Bind to openshift-cluster-monitoring-view if it exists (some clusters may not have it)
   bindOpenshiftClusterMonitoringView: false
   # Loki release name for ClusterRole binding

@@ -229,15 +229,10 @@ helm_llm_service_args = \
     $(if $(SAFETY_TOLERATION),--set-json global.models.$(SAFETY).tolerations='$(call TOLERATIONS_TEMPLATE,$(SAFETY_TOLERATION))',) \
     $(if $(RAW_DEPLOYMENT),--set llm-service.rawDeploymentMode=$(RAW_DEPLOYMENT),)
 
-# Process LLM_URL to add default port and /v1 if port is missing
+# Preserve the complete operator-supplied base URL, including scheme and port.
+# Supply /v1 explicitly; never append :8080 to an HTTPS Route.
 define process_llm_url
-$(if $(LLM_URL),$(shell \
-    if echo "$(LLM_URL)" | grep -q ":[0-9]"; then \
-        echo "$(LLM_URL)"; \
-    else \
-        echo "$(LLM_URL)$(DEFAULT_LLM_PORT_AND_PATH)"; \
-    fi \
-),)
+$(patsubst %/,%,$(LLM_URL))
 endef
 
 helm_llama_stack_args = \
@@ -574,19 +569,19 @@ install-console-plugin: namespace check-console-plugin-namespace
 		$(if $(PLUGIN_AUTO_ENABLE),--set plugin.autoEnable=$(PLUGIN_AUTO_ENABLE),)
 	@echo "✅ Console plugin deployed"
 	@echo "→ Enabling plugin in OpenShift Console..."
-	-@if oc get console.operator.openshift.io cluster -o jsonpath='{.spec.plugins}' 2>/dev/null | grep -q "openshift-ai-observability"; then \
-		echo "  → Plugin 'openshift-ai-observability' already enabled"; \
+	-@if oc get console.operator.openshift.io cluster -o jsonpath='{.spec.plugins}' 2>/dev/null | grep -q "aiobs-console-plugin"; then \
+		echo "  → Plugin 'aiobs-console-plugin' already enabled"; \
 	else \
-		oc patch console.operator.openshift.io cluster --type=json -p='[{\"op\": \"add\", \"path\": \"/spec/plugins/-\", \"value\": \"openshift-ai-observability\"}]' 1>/dev/null; \
-		echo "  → Plugin 'openshift-ai-observability' enabled"; \
+		oc patch console.operator.openshift.io cluster --type=json -p='[{\"op\": \"add\", \"path\": \"/spec/plugins/-\", \"value\": \"aiobs-console-plugin\"}]' 1>/dev/null; \
+		echo "  → Plugin 'aiobs-console-plugin' enabled"; \
 	fi
 
 .PHONY: uninstall-console-plugin
 uninstall-console-plugin:
 	@echo "Uninstalling OpenShift Console Plugin"
 	@echo "→ Disabling plugin in OpenShift Console..."
-	-@if oc get console.operator.openshift.io cluster -o jsonpath='{.spec.plugins}' 2>/dev/null | grep -q "openshift-ai-observability"; then \
-		PLUGIN_INDEX=$$(oc get console.operator.openshift.io cluster -o json | jq '.spec.plugins | to_entries | .[] | select(.value=="openshift-ai-observability") | .key'); \
+	-@if oc get console.operator.openshift.io cluster -o jsonpath='{.spec.plugins}' 2>/dev/null | grep -q "aiobs-console-plugin"; then \
+		PLUGIN_INDEX=$$(oc get console.operator.openshift.io cluster -o json | jq '.spec.plugins | to_entries | .[] | select(.value=="aiobs-console-plugin") | .key'); \
 		if [ -n "$$PLUGIN_INDEX" ]; then \
 			oc patch console.operator.openshift.io cluster --type=json -p="[{\"op\": \"remove\", \"path\": \"/spec/plugins/$$PLUGIN_INDEX\"}]" 2>/dev/null; \
 			echo "  → Plugin disabled from console"; \

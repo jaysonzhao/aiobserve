@@ -1,3 +1,4 @@
+{{- if ne .Values.trustedCA.create false }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -6,3 +7,5 @@ metadata:
     service.beta.openshift.io/inject-cabundle: "true"
 
 
+
+{{- end }}

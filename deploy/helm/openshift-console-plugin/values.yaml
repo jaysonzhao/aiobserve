@@ -6,6 +6,8 @@ plugin:
   image:
     repository: quay.io/ecosystem-appeng/aiobs-console-plugin
     tag: 3.2.0
+    # Optional immutable image digest; when set, deployment uses repository@digest.
+    digest: ""
   imagePullPolicy: Always
   imagePullSecrets: []
   replicas: 1

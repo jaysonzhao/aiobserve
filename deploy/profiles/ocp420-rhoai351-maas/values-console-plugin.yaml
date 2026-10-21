@@ -1,0 +1,16 @@
+plugin:
+  name: aiobs-console-plugin
+  description: AI Observability Plugin
+  image:
+    repository: quay.io/ecosystem-appeng/aiobs-console-plugin
+    tag: 3.2.0
+    digest: sha256:0ee7817644a7ec03035e36c47f41fe116c6b84014d949bcd80cfb9a84d34efe0
+  jobs:
+    patchConsoles:
+      image: registry.redhat.io/openshift4/ose-tools-rhel9@sha256:ee65b244fc94d5765514c604dc0a288517dcdce68de65128d047622b6b30a618
+
+mcpServer:
+  enabled: true
+  serviceName: aiobs-mcp-server-svc
+  namespace: ai-observability
+  port: 8085

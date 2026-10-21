@@ -1,0 +1,48 @@
+image:
+  repository: quay.io/ecosystem-appeng/aiobs-mcp-server
+  tag: v3.2.0
+  digest: sha256:2f04c442d99ea764e9c7e84322bbe52cf2fa74e3996ad8c890c2e458ab9c8705
+
+env:
+  DEV_MODE: "false"
+  MAAS_API_URL: "https://maas.apps.cluster-v4vsc.v4vsc.sandbox287.opentlc.com/llm/gpt-oss-20b/v1"
+  PROMETHEUS_URL: "https://thanos-querier.openshift-monitoring.svc.cluster.local:9091"
+  TEMPO_URL: ""
+  TEMPO_TENANT_ID: ""
+  KORREL8R_URL: ""
+  LLM_TIMEOUT_SECONDS: 180
+
+route:
+  enabled: false
+
+trustedCA:
+  enabled: true
+  create: false
+  configMapName: aiobs-mcp-server-trusted-ca-bundle
+
+extraEnv:
+  - name: REQUESTS_CA_BUNDLE
+    value: /etc/pki/ca-trust/extracted/pem/ca-bundle.crt
+  - name: SSL_CERT_FILE
+    value: /etc/pki/ca-trust/extracted/pem/ca-bundle.crt
+
+modelConfig:
+  maas/gpt-oss-20b:
+    external: true
+    requiresApiKey: true
+    provider: maas
+    serviceName: null
+    apiUrl: https://maas.apps.cluster-v4vsc.v4vsc.sandbox287.opentlc.com/llm/gpt-oss-20b/v1/chat/completions
+    modelName: gpt-oss-20b
+    apiKeySecretField: gpt-oss-20b
+    cost:
+      prompt_rate: 0.0
+      output_rate: 0.0
+    _metadata:
+      source: user
+      description: GPT-OSS-20B MaaS profile; API key pending
+
+rbac:
+  createGrafanaRole: false
+  bindKorrel8rView: false
+  bindLokiTenantLogs: false

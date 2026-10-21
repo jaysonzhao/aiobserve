@@ -1,0 +1,19 @@
+{
+  "maas/gpt-oss-20b": {
+    "external": true,
+    "requiresApiKey": true,
+    "provider": "maas",
+    "serviceName": null,
+    "apiUrl": "https://maas.apps.cluster-v4vsc.v4vsc.sandbox287.opentlc.com/llm/gpt-oss-20b/v1/chat/completions",
+    "modelName": "gpt-oss-20b",
+    "apiKeySecretField": "gpt-oss-20b",
+    "cost": {
+      "prompt_rate": 0.0,
+      "output_rate": 0.0
+    },
+    "_metadata": {
+      "source": "user",
+      "description": "GPT-OSS-20B MaaS profile; API key pending"
+    }
+  }
+}
