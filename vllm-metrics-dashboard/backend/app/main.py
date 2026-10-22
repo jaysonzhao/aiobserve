@@ -23,7 +23,7 @@ from .settings import settings
 from .snapshots import snapshots
 from .time_utils import TimeRangeError, parse_bounds
 
-app = FastAPI(title="vLLM Metrics Dashboard", version="1.0.0", docs_url=None, redoc_url=None)
+app = FastAPI(title="vLLM Metrics Dashboard", version="1.1.0", docs_url=None, redoc_url=None)
 
 
 @app.get("/api/v1/namespaces")
@@ -50,6 +50,9 @@ class QueryBody(BaseModel):
     scope: Literal["pod", "service"] = "pod"
     window: Literal["1m", "2m", "5m", "10m", "15m", "30m", "1h", "24h"] = "5m"
     percentile: Literal[50, 90, 95, 99] = 95
+    queue_slo_seconds: float = Field(default=0.5, gt=0, le=3600)
+    queue_min_observations: int = Field(default=30, ge=1, le=1_000_000)
+    queue_slo_confirmed: bool = False
     selectors: dict[str, str | None] = Field(default_factory=dict)
     revision: str | None = Field(default=None, max_length=120)
 
@@ -96,7 +99,19 @@ async def readyz() -> JSONResponse:
 
 @app.get("/api/v1/catalog")
 async def get_catalog(actor: Actor = Depends(request_actor)) -> dict[str, Any]:
-    return {"metrics": catalog(), "top10_ids": list(TOP10_IDS), "registry_version": "1.0.0"}
+    return {
+        "metrics": catalog(),
+        "top10_ids": list(TOP10_IDS),
+        "registry_version": "1.1.0",
+        "scale_gate": {
+            "window_seconds": 900,
+            "windows": 3,
+            "scope": "service",
+            "queue_slo_default_seconds": 0.5,
+            "queue_observation_review_floor": 30,
+            "queue_slo_is_provisional": True,
+        },
+    }
 
 
 @app.get("/api/v1/filters")
@@ -163,6 +178,9 @@ async def query_dashboard(
             view_scope=body.scope,
             window=body.window,
             percentile=body.percentile,
+            queue_slo_seconds=body.queue_slo_seconds,
+            queue_min_observations=body.queue_min_observations,
+            queue_slo_confirmed=body.queue_slo_confirmed,
             selected_filters={key: value for key, value in body.selectors.items() if value},
             revision=body.revision,
         )
@@ -192,6 +210,8 @@ async def daily_tokens(
         result = await build_snapshot(
             namespace=body.namespace, model_id=body.model_id, start=start, end=end, zone=zone,
             metric_ids=[34, 35], view_scope=body.scope, window=body.window, percentile=body.percentile,
+            queue_slo_seconds=body.queue_slo_seconds, queue_min_observations=body.queue_min_observations,
+            queue_slo_confirmed=body.queue_slo_confirmed,
             selected_filters={key: value for key, value in body.selectors.items() if value}, revision=body.revision,
         )
     except TimeRangeError as exc:

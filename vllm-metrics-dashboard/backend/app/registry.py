@@ -23,10 +23,14 @@ class MetricSpec:
     sources: tuple[str, ...] = ()
     derived: str | None = None
     capability: str | None = None
+    metric_aliases: tuple[str, ...] = ()
+    evaluation_window: str | None = None
+    evaluation_windows: int | None = None
 
     def public(self, state: str = "unknown", reason: str | None = None) -> dict[str, Any]:
         result = asdict(self)
         result["sources"] = list(self.sources)
+        result["metric_aliases"] = list(self.metric_aliases)
         result["state"] = state
         result["reason"] = reason
         return result
@@ -49,6 +53,9 @@ def _m(
     sources: tuple[str, ...] = (),
     derived: str | None = None,
     capability: str | None = None,
+    metric_aliases: tuple[str, ...] = (),
+    evaluation_window: str | None = None,
+    evaluation_windows: int | None = None,
 ) -> MetricSpec:
     return MetricSpec(
         metric_id,
@@ -66,12 +73,15 @@ def _m(
         sources,
         derived,
         capability,
+        metric_aliases,
+        evaluation_window,
+        evaluation_windows,
     )
 
 
 METRICS: tuple[MetricSpec, ...] = (
-    _m(1, "Queue", "P95 queue duration", "histogram", "vllm:", "request_queue_time_seconds", "seconds", "histogram_quantile", "5m", "pod", "Time from request acceptance until scheduling begins.", percentile=95),
-    _m(2, "KV", "Preemptions in 15m", "counter_increase", "vllm:", "num_preemptions_total", "events", "sum increase", "15m", "pod", "KV-cache preemptions over the rolling 15-minute window."),
+    _m(1, "Queue", "P95 queue duration", "histogram", "vllm:", "request_queue_time_seconds", "seconds", "histogram_quantile", "5m", "pod", "Time from request acceptance until scheduling begins.", percentile=95, evaluation_window="15m", evaluation_windows=3),
+    _m(2, "KV", "Preemptions in 15m", "counter_increase", "vllm:", "num_preemptions_total", "events", "sum increase", "15m", "pod", "KV-cache preemptions over the rolling 15-minute window.", metric_aliases=("num_preemptions",), evaluation_window="15m", evaluation_windows=3),
     _m(3, "Latency", "P50 TTFT", "histogram", "vllm:", "time_to_first_token_seconds", "seconds", "histogram_quantile", "5m", "pod", "Median engine time to first generated token.", percentile=50),
     _m(4, "Latency", "P95 TTFT", "histogram", "vllm:", "time_to_first_token_seconds", "seconds", "histogram_quantile", "5m", "pod", "P95 engine time to first generated token.", percentile=95),
     _m(5, "Latency", "P99 TTFT", "histogram", "vllm:", "time_to_first_token_seconds", "seconds", "histogram_quantile", "5m", "pod", "P99 engine time to first generated token.", percentile=99),
@@ -86,8 +96,8 @@ METRICS: tuple[MetricSpec, ...] = (
     _m(14, "KV", "KV occupancy", "gauge", "vllm:", "kv_cache_usage_perc", "fraction (0-1)", "max", "instant", "pod", "vLLM KV-cache occupancy fraction; 0.90 means 90%."),
     _m(15, "KV", "Peak KV occupancy", "derived", "vllm:", None, "fraction (0-1)", "max_over_time, then max", "5m", "pod", "Peak sampled KV-cache occupancy over the rolling window.", sources=("kv_cache_usage_perc",), derived="peak_kv_occupancy"),
     _m(16, "KV", "KV occupancy percent", "derived", "vllm:", None, "percent", "100 * max", "instant", "pod", "Display alias for KV occupancy in percent.", sources=("kv_cache_usage_perc",), derived="kv_occupancy_percent"),
-    _m(17, "KV", "Hourly preemptions", "counter_increase", "vllm:", "num_preemptions_total", "events", "sum increase", "1h", "pod", "KV-cache preemptions over the rolling 1-hour window."),
-    _m(18, "KV", "Preemptions/minute", "counter_rate", "vllm:", "num_preemptions_total", "events/minute", "60 * sum rate", "5m", "pod", "Rate of KV-cache preemptions."),
+    _m(17, "KV", "Hourly preemptions", "counter_increase", "vllm:", "num_preemptions_total", "events", "sum increase", "1h", "pod", "KV-cache preemptions over the rolling 1-hour window.", metric_aliases=("num_preemptions",)),
+    _m(18, "KV", "Preemptions/minute", "counter_rate", "vllm:", "num_preemptions_total", "events/minute", "60 * sum rate", "5m", "pod", "Rate of KV-cache preemptions.", metric_aliases=("num_preemptions",)),
     _m(19, "Traffic", "Normal completions/s", "counter_rate", "vllm:", "request_success_total", "requests/s", "sum rate", "5m", "pod", "Successful requests with finished_reason stop or length only."),
     _m(20, "Traffic", "Input tokens/s", "counter_rate", "vllm:", "prompt_tokens_total", "tokens/s", "sum rate", "5m", "pod", "Prompt tokens processed per second."),
     _m(21, "Traffic", "Output tokens/s", "counter_rate", "vllm:", "generation_tokens_total", "tokens/s", "sum rate", "5m", "pod", "Generated output tokens per second."),

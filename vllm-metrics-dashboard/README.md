@@ -19,6 +19,7 @@ Kubernetes pod owner references resolve these to the KServe engine Deployments. 
 ## Features
 
 - Ten ranked capacity signals from catalog IDs `4, 7, 9, 10, 1, 11, 14, 2, 21, 20`, plus the full 41-entry catalog.
+- A separate two-metric scale-review gate: service P95 queue time over the latest three completed 15-minute windows at or before snapshot end, plus recurrent preemptions in at least two of those windows. The 0.5-second queue SLO is provisional and editable; the gate never scales workloads.
 - Namespace, served-model, deployment, pod, instance, job, engine, time range, timezone, percentile, and rate-window filters.
 - Per-pod views and service aggregation. Histograms aggregate buckets before quantile calculation; distinct deployments remain separate.
 - Hong Kong-local calendar-day input and output token estimates, with partial-day labels. Rolling 24-hour counters remain a separate view.
@@ -35,12 +36,15 @@ vllm-metrics-dashboard/
 ├── backend/tests/           Backend behavior tests
 ├── frontend/src/             React/TypeScript UI, ECharts views, date conversion
 ├── openshift/               OpenShift ServiceAccount, RBAC, Route and Deployment
-├── disconnected/            Image mirroring workflow and disconnected deploy overlay
+├── disconnected/            Offline image archive instructions and disconnected deploy overlay
 ├── Dockerfile               Multi-stage frontend/backend image
+├── docs/                    Study review and scale-gate interpretation
 └── README.md
 ```
 
-For restricted or disconnected clusters, use the [disconnected deployment package](disconnected/README.md). It includes an offline Dockerfile, image archive transfer steps, and a separate overlay that points directly at images in a registry reachable by the cluster.
+For restricted or disconnected clusters, use the [disconnected deployment package](disconnected/README.md). It includes an offline Dockerfile, Podman image archive transfer steps, and a separate overlay that points directly at images in a registry reachable by the cluster; it does not require `oc-mirror`.
+
+See [the scale-gate review](docs/scale-gate-validation.md) for the evidence, Prometheus metric-name compatibility, policy caveats and hardware/model qualifications.
 
 ## Local frontend and backend development
 

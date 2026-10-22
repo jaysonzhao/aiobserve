@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import math
 import re
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -64,6 +65,7 @@ def _empty_snapshot(
     *, namespace: str, model_id: str, identity: dict[str, str] | None, start: datetime, end: datetime,
     zone: Any, ids: list[int], view_scope: str, window: str, percentile: int,
     selected_filters: dict[str, str | None], revision: str | None, discovery: dict[str, Any],
+    queue_slo_seconds: float, queue_min_observations: int, queue_slo_confirmed: bool,
 ) -> dict[str, Any]:
     from .time_utils import choose_step
 
@@ -78,6 +80,8 @@ def _empty_snapshot(
             "scope": view_scope,
             "series": [], "summary": [], "observations": [], "coverage": [], "queries": [],
             "warnings": [], "scope_states": [], "selected_range_total": [],
+            "scale_gate_series": [], "scale_gate_observations": [],
+            "scale_gate_queries": [], "scale_gate_reasons": [],
         }
     models = []
     if identity:
@@ -98,7 +102,15 @@ def _empty_snapshot(
                 "window": window, "percentile": percentile, "scope": view_scope,
             },
         },
-        "registry_version": "1.0.0",
+        "registry_version": "1.1.0",
+        "scale_gate": {
+            "window_seconds": 900,
+            "windows": 3,
+            "scope": "service",
+            "queue_slo_seconds": queue_slo_seconds,
+            "queue_min_observations": queue_min_observations,
+            "queue_slo_is_provisional": not queue_slo_confirmed,
+        },
         "adapter": {"metric_prefix": "vllm:", "namespace_label": "namespace", "model_label": "model_name", "pod_label": "pod", "instance_label": "instance"},
         "metrics": metrics,
         "daily_tokens": {"state": "no_observations", "rows": [], "warnings": ["No local-day token observations were discovered for this selection."]},
@@ -113,24 +125,140 @@ def _group_labels(view_scope: str) -> str:
     return "namespace, model_name" if view_scope == "service" else "namespace, model_name, pod, instance"
 
 
-def _count_query(spec_metric: str, scope: dict[str, Any], view_scope: str, duration_seconds: int) -> str:
+def _count_query(
+    spec_metric: str,
+    scope: dict[str, Any],
+    view_scope: str,
+    duration_seconds: int,
+    selected_filters: dict[str, str | None] | None = None,
+) -> str:
     count_name = HISTOGRAM_COUNT_METRICS[spec_metric]
     metric = "vllm:" + count_name
     from .promql import selector
 
-    scoped = selector(metric, scope)
+    scoped = selector(metric, scope, optional=selected_filters)
     return f"sum by ({_group_labels(view_scope)}) (increase({scoped}[{duration_seconds}s]))"
+
+
+def _scale_gate_bounds(start: datetime, end: datetime, spec: Any) -> tuple[datetime, datetime, int] | None:
+    """Return the evaluation range for completed, non-overlapping gate windows."""
+    if not spec.evaluation_window or not spec.evaluation_windows:
+        return None
+    seconds = 900 if spec.evaluation_window == "15m" else None
+    if seconds is None:
+        return None
+    latest = int(end.timestamp()) // seconds * seconds
+    first = latest - (spec.evaluation_windows - 1) * seconds
+    # Every evaluated window must lie inside the selected absolute range.
+    if first - seconds < start.timestamp():
+        return None
+    return (
+        datetime.fromtimestamp(first, UTC),
+        datetime.fromtimestamp(latest, UTC),
+        seconds,
+    )
+
+
+async def _scale_gate_data(
+    spec: Any,
+    scope: dict[str, Any],
+    *,
+    start: datetime,
+    end: datetime,
+    selected_filters: dict[str, str | None],
+) -> dict[str, Any]:
+    empty = {
+        "scale_gate_series": [],
+        "scale_gate_observations": [],
+        "scale_gate_query": None,
+        "scale_gate_observation_query": None,
+        "scale_gate_reason": None,
+    }
+    if spec.id not in {1, 2}:
+        return empty
+    bounds = _scale_gate_bounds(start, end, spec)
+    if bounds is None:
+        return {**empty, "scale_gate_reason": "The selected range does not contain three complete 15-minute windows."}
+
+    gate_start, gate_end, step = bounds
+    from .promql import compile_query, selector
+
+    try:
+        candidates = (spec.metric, *spec.metric_aliases)
+        query = None
+        payload: dict[str, Any] = {}
+        for metric_name in candidates:
+            if not metric_name:
+                continue
+            candidate = replace(spec, metric=metric_name)
+            candidate_query = compile_query(
+                candidate,
+                scope,
+                view_scope="service",
+                window=spec.evaluation_window,
+                percentile=95,
+                selected_filters=selected_filters,
+            )
+            candidate_payload = await monitoring.query_range(
+                candidate_query,
+                start=gate_start.timestamp(),
+                end=gate_end.timestamp(),
+                step=step,
+            )
+            query = candidate_query
+            payload = candidate_payload
+            if candidate_payload.get("data", {}).get("result", []):
+                break
+        raw_results = payload.get("data", {}).get("result", [])
+        series = [_matrix_series(item, scope["deployment"], scope["model_name"]) for item in raw_results]
+        result = {**empty, "scale_gate_series": series, "scale_gate_query": query}
+        if spec.id == 1:
+            count_name = HISTOGRAM_COUNT_METRICS[spec.metric]
+            count_selector = selector(
+                "vllm:" + count_name,
+                scope,
+                optional=selected_filters,
+            )
+            observation_query = (
+                f"sum by ({_group_labels('service')}) "
+                f"(increase({count_selector}[{spec.evaluation_window}]))"
+            )
+            count_payload = await monitoring.query_range(
+                observation_query,
+                start=gate_start.timestamp(),
+                end=gate_end.timestamp(),
+                step=step,
+            )
+            count_results = count_payload.get("data", {}).get("result", [])
+            result["scale_gate_observations"] = [
+                _matrix_series(item, scope["deployment"], scope["model_name"])
+                for item in count_results
+            ]
+            result["scale_gate_observation_query"] = observation_query
+        if not series:
+            result["scale_gate_reason"] = "No complete 15-minute gate observations were returned."
+        return result
+    except (MonitoringError, QueryUnavailable, ValueError, AssertionError) as exc:
+        return {**empty, "scale_gate_reason": str(exc)}
 
 
 async def _availability(spec: Any, scope: dict[str, Any], start: datetime, end: datetime) -> str:
     try:
-        exact = metric_selector_for_capability(spec, scope)
-        found = await monitoring.series(exact, start=start.timestamp(), end=end.timestamp(), limit=1)
-        if found:
-            return "exported"
+        metric_names = (spec.metric, *spec.metric_aliases)
+        selectors = [
+            metric_selector_for_capability(replace(spec, metric=name), scope)
+            for name in metric_names if name
+        ] or [metric_selector_for_capability(spec, scope)]
+        for exact in selectors:
+            found = await monitoring.series(exact, start=start.timestamp(), end=end.timestamp(), limit=1)
+            if found:
+                return "exported"
         now = datetime.now(UTC).timestamp()
-        recent = await monitoring.series(exact, start=now - 30 * 86400, end=now, limit=1)
-        return "exported" if recent else "not_exported"
+        for exact in selectors:
+            recent = await monitoring.series(exact, start=now - 30 * 86400, end=now, limit=1)
+            if recent:
+                return "exported"
+        return "not_exported"
     except MonitoringError as exc:
         if exc.state == "not_authorized":
             return "not_authorized"
@@ -163,8 +291,16 @@ async def _run_one(
         "query": None,
         "summary_query": None,
         "warnings": [],
+        "scale_gate_series": [],
+        "scale_gate_observations": [],
+        "scale_gate_query": None,
+        "scale_gate_observation_query": None,
+        "scale_gate_reason": None,
     }
     try:
+        base.update(await _scale_gate_data(
+            spec, scope, start=start, end=end, selected_filters=selected_filters
+        ))
         query = compile_query(
             spec,
             scope,
@@ -179,6 +315,32 @@ async def _run_one(
         )
         range_payload = await monitoring.query_range(query, start=start.timestamp(), end=end.timestamp(), step=step)
         raw_results = range_payload.get("data", {}).get("result", [])
+        effective_spec = spec
+        if not raw_results and spec.metric_aliases:
+            for alias in spec.metric_aliases:
+                candidate = replace(spec, metric=alias)
+                candidate_query = compile_query(
+                    candidate,
+                    scope,
+                    view_scope=view_scope,
+                    window=window,
+                    percentile=percentile,
+                    http_handler_regex=http_options["handler_regex"],
+                    http_method_label=http_options["method_label"],
+                    http_handler_label=http_options["handler_label"],
+                    http_status_label=http_options["status_label"],
+                    selected_filters=selected_filters,
+                )
+                candidate_payload = await monitoring.query_range(
+                    candidate_query, start=start.timestamp(), end=end.timestamp(), step=step
+                )
+                candidate_results = candidate_payload.get("data", {}).get("result", [])
+                if candidate_results:
+                    effective_spec = candidate
+                    query = candidate_query
+                    range_payload = candidate_payload
+                    raw_results = candidate_results
+                    break
         if len(raw_results) > settings.max_series_per_chart:
             return {**base, "query": query, "state": "query_error", "reason": "Series limit exceeded; narrow the selected workload or pod filter."}
         series = [_matrix_series(item, scope["deployment"], scope["model_name"]) for item in raw_results]
@@ -186,20 +348,20 @@ async def _run_one(
             return {**base, "query": query, "state": "query_error", "reason": "Point limit exceeded; use a coarser time range."}
 
         summary_query = compile_query(
-            spec,
+            effective_spec,
             scope,
             view_scope=view_scope,
             window=window,
             percentile=percentile,
             selected_range_seconds=max(1, int((end - start).total_seconds())),
-            summary=spec.kind in {"histogram", "counter_rate"},
+            summary=effective_spec.kind in {"histogram", "counter_rate"},
             http_handler_regex=http_options["handler_regex"],
             http_method_label=http_options["method_label"],
             http_handler_label=http_options["handler_label"],
             http_status_label=http_options["status_label"],
             selected_filters=selected_filters,
         )
-        if spec.kind == "counter_increase":
+        if effective_spec.kind == "counter_increase":
             # The card keeps its specified rolling window. The full-selection
             # increase is exposed separately as a companion statistic.
             summary_query = query
@@ -208,9 +370,9 @@ async def _run_one(
         summary = [_vector_series(item, scope["deployment"], scope["model_name"]) for item in summary_results]
 
         selected_range_total: list[dict[str, Any]] = []
-        if spec.kind == "counter_increase":
+        if effective_spec.kind == "counter_increase":
             range_total_query = compile_query(
-                spec,
+                effective_spec,
                 scope,
                 view_scope=view_scope,
                 window=window,
@@ -232,9 +394,9 @@ async def _run_one(
 
         observations: list[dict[str, Any]] = []
         observation_query = None
-        if spec.kind == "histogram" and spec.metric in HISTOGRAM_COUNT_METRICS:
+        if effective_spec.kind == "histogram" and effective_spec.metric in HISTOGRAM_COUNT_METRICS:
             observation_query = _count_query(
-                spec.metric, scope, view_scope, max(1, int((end - start).total_seconds()))
+                effective_spec.metric, scope, view_scope, max(1, int((end - start).total_seconds())), selected_filters
             )
             observation_payload = await monitoring.query(observation_query, at=end.timestamp())
             observations = [
@@ -244,9 +406,9 @@ async def _run_one(
 
         coverage = _coverage(series, step, end)
         warnings = list(range_payload.get("warnings", [])) + list(range_payload.get("infos", []))
-        if spec.kind == "histogram" and not observations:
+        if effective_spec.kind == "histogram" and not observations:
             warnings.append("No matching histogram observations were returned for the selected interval.")
-        if spec.kind == "histogram" and any((item.get("value") or 0) < 30 for item in observations):
+        if effective_spec.kind == "histogram" and any((item.get("value") or 0) < 30 for item in observations):
             warnings.append("Some histogram series have fewer than 30 observations; percentile estimates are low-volume.")
         if spec.id == 22:
             warnings.append("Combined input/output token rate is usage accounting, not a uniform compute-capacity unit.")
@@ -256,7 +418,7 @@ async def _run_one(
             warnings.append("Rolling 24-hour increase; use Daily tokens for Hong Kong calendar-day estimates.")
 
         if not series:
-            availability = await _availability(spec, scope, start, end)
+            availability = await _availability(effective_spec, scope, start, end)
             if availability == "not_exported":
                 state, reason = "not_exported", "No metric series were found in the selected range or recent 30-day retention."
             elif availability == "not_authorized":
@@ -424,6 +586,9 @@ async def build_snapshot(
     view_scope: str,
     window: str,
     percentile: int,
+    queue_slo_seconds: float,
+    queue_min_observations: int,
+    queue_slo_confirmed: bool,
     selected_filters: dict[str, str | None],
     revision: str | None,
 ) -> dict[str, Any]:
@@ -453,12 +618,16 @@ async def build_snapshot(
                 namespace=namespace, model_id=model_id, identity=identity, start=start, end=end, zone=zone,
                 ids=ids, view_scope=view_scope, window=window, percentile=percentile,
                 selected_filters=selected_filters, revision=revision, discovery=discovery,
+                queue_slo_seconds=queue_slo_seconds, queue_min_observations=queue_min_observations,
+                queue_slo_confirmed=queue_slo_confirmed,
             )
     if not selected_scopes and model_id == "all":
         return _empty_snapshot(
             namespace=namespace, model_id=model_id, identity=None, start=start, end=end, zone=zone,
             ids=ids, view_scope=view_scope, window=window, percentile=percentile,
             selected_filters=selected_filters, revision=revision, discovery=discovery,
+            queue_slo_seconds=queue_slo_seconds, queue_min_observations=queue_min_observations,
+            queue_slo_confirmed=queue_slo_confirmed,
         )
     for key, value in selected_filters.items():
         if not value:
@@ -546,6 +715,10 @@ async def build_snapshot(
                 "warnings": [],
                 "scope_states": [],
                 "selected_range_total": [],
+                "scale_gate_series": [],
+                "scale_gate_observations": [],
+                "scale_gate_queries": [],
+                "scale_gate_reasons": [],
             },
         )
         entry["series"].extend(result.get("series", []))
@@ -554,12 +727,27 @@ async def build_snapshot(
         entry["coverage"].append({"deployment": scope["deployment"], **result.get("coverage", {})})
         entry["warnings"].extend(result.get("warnings", []))
         entry["selected_range_total"].extend(result.get("selected_range_total", []))
+        entry["scale_gate_series"].extend(result.get("scale_gate_series", []))
+        entry["scale_gate_observations"].extend(result.get("scale_gate_observations", []))
+        if result.get("scale_gate_query") or result.get("scale_gate_observation_query"):
+            entry["scale_gate_queries"].append({
+                "deployment": scope["deployment"],
+                "promql": result.get("scale_gate_query"),
+                "observation_promql": result.get("scale_gate_observation_query"),
+            })
+        if result.get("scale_gate_reason"):
+            entry["scale_gate_reasons"].append({
+                "deployment": scope["deployment"],
+                "reason": result["scale_gate_reason"],
+            })
         entry["queries"].append({
             "deployment": scope["deployment"],
             "promql": result.get("query"),
             "summary_promql": result.get("summary_query"),
             "selected_range_promql": result.get("selected_range_query"),
             "observation_promql": result.get("observation_query"),
+            "scale_gate_promql": result.get("scale_gate_query"),
+            "scale_gate_observation_promql": result.get("scale_gate_observation_query"),
         })
         entry["scope_states"].append({
             "deployment": scope["deployment"],
@@ -607,7 +795,15 @@ async def build_snapshot(
             "range": frozen_range,
             "selectors": selected_filters,
         },
-        "registry_version": "1.0.0",
+        "registry_version": "1.1.0",
+        "scale_gate": {
+            "window_seconds": 900,
+            "windows": 3,
+            "scope": "service",
+            "queue_slo_seconds": queue_slo_seconds,
+            "queue_min_observations": queue_min_observations,
+            "queue_slo_is_provisional": not queue_slo_confirmed,
+        },
         "adapter": {
             "metric_prefix": "vllm:",
             "namespace_label": "namespace",

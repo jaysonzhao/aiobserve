@@ -42,6 +42,36 @@ def _csv_safe(value: Any) -> Any:
     return value
 
 
+def _scale_gate_rows(snapshot: dict[str, Any]) -> list[list[Any]]:
+    metrics = snapshot.get("metrics", {})
+
+    def points(metric_id: str, field: str) -> dict[str, dict[int, float]]:
+        result: dict[str, dict[int, float]] = {}
+        for series in metrics.get(metric_id, {}).get(field, []):
+            deployment = str(series.get("deployment") or "Selection")
+            target = result.setdefault(deployment, {})
+            for point in series.get("points", []):
+                if point.get("value") is not None:
+                    target[round(float(point["timestamp"]))] = float(point["value"])
+        return result
+
+    queue = points("1", "scale_gate_series")
+    counts = points("1", "scale_gate_observations")
+    preemptions = points("2", "scale_gate_series")
+    deployments = sorted(set(queue) | set(counts) | set(preemptions))
+    gate = snapshot.get("scale_gate", {})
+    rows: list[list[Any]] = []
+    for deployment in deployments:
+        timestamps = sorted(set(queue.get(deployment, {})) | set(counts.get(deployment, {})) | set(preemptions.get(deployment, {})))
+        for timestamp in timestamps[-3:]:
+            rows.append([
+                deployment, timestamp, queue.get(deployment, {}).get(timestamp),
+                counts.get(deployment, {}).get(timestamp), preemptions.get(deployment, {}).get(timestamp),
+                gate.get("queue_slo_seconds"), gate.get("queue_min_observations"),
+            ])
+    return rows
+
+
 def _rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     filters = snapshot.get("filters", {})
@@ -90,7 +120,10 @@ def _rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 "reason": metric.get("reason"),
             })
         for query in metric.get("queries", []):
-            for kind in ("promql", "summary_promql", "selected_range_promql", "observation_promql"):
+            for kind in (
+                "promql", "summary_promql", "selected_range_promql", "observation_promql",
+                "scale_gate_promql", "scale_gate_observation_promql",
+            ):
                 expression = query.get(kind)
                 if expression:
                     rows.append({
@@ -121,6 +154,40 @@ def _rows(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             "range_start_utc": interval.get("start_utc"), "range_end_utc": interval.get("end_utc"),
             "reason": item.get("reason"),
         })
+    gate = snapshot.get("scale_gate", {})
+    if gate:
+        rows.append({
+            "record_type": "scale_gate_policy", "metric_id": "1+2",
+            "metric": "Queue P95 plus recurrent preemptions", "state": "configured",
+            "namespace": filters.get("namespace"), "timestamp_utc": range_info.get("end_utc"),
+            "timestamp_local": range_info.get("end_local"),
+            "value": gate.get("queue_slo_seconds"), "unit": "seconds",
+            "labels_json": json.dumps({
+                "scope": gate.get("scope"), "window_seconds": gate.get("window_seconds"),
+                "windows": gate.get("windows"), "queue_min_observations": gate.get("queue_min_observations"),
+                "queue_rule": "P95 exceeds SLO in all 3 consecutive windows",
+                "preemption_rule": "increase is greater than zero in at least 2 of 3 windows",
+                "queue_slo_is_provisional": gate.get("queue_slo_is_provisional"),
+            }, ensure_ascii=False, sort_keys=True),
+            "range_start_utc": range_info.get("start_utc"), "range_end_utc": range_info.get("end_utc"),
+            "reason": "Policy settings and raw gate points are exported for review; no scaling action is taken.",
+        })
+        for deployment, timestamp, queue_p95, observations, preemptions, _, _ in _scale_gate_rows(snapshot):
+            timestamp_utc, timestamp_local = _timestamp_pair(timestamp, timezone)
+            for record_type, value, unit, metric_id in (
+                ("scale_gate_queue_p95", queue_p95, "seconds", "1"),
+                ("scale_gate_queue_observations", observations, "observations", "1"),
+                ("scale_gate_preemptions", preemptions, "events/15m", "2"),
+            ):
+                if value is None:
+                    continue
+                rows.append({
+                    "record_type": record_type, "metric_id": metric_id, "metric": record_type.replace("scale_gate_", "").replace("_", " "),
+                    "state": "observed", "namespace": filters.get("namespace"), "deployment": deployment,
+                    "timestamp_utc": timestamp_utc, "timestamp_local": timestamp_local, "value": value, "unit": unit,
+                    "labels_json": json.dumps({"evaluation_window_seconds": gate.get("window_seconds"), "scope": gate.get("scope")}, sort_keys=True),
+                    "range_start_utc": range_info.get("start_utc"), "range_end_utc": range_info.get("end_utc"),
+                })
     if len(rows) > settings.max_export_rows:
         raise OverflowError(f"Export exceeds the configured {settings.max_export_rows:,}-row limit.")
     return rows
@@ -209,6 +276,13 @@ def _xlsx(snapshot: dict[str, Any], rows: list[dict[str, Any]]) -> bytes:
         ] for row in snapshot.get("daily_tokens", {}).get("rows", [])]
         add_sheet("Daily tokens", ["Local date", "Deployment", "Metric", "Estimate", "Unit", "State", "Partial day", "Start UTC", "End UTC", "Reason"], daily_rows)
 
+        gate_rows = _scale_gate_rows(snapshot)
+        add_sheet(
+            "Scale gate",
+            ["Deployment", "Window end epoch", "Queue P95 seconds", "Queue observations", "Preemptions per 15m", "Queue SLO seconds", "Low-volume review floor"],
+            gate_rows,
+        )
+
         filters = snapshot.get("filters", {})
         bounds = filters.get("range", {})
         metadata = [
@@ -219,6 +293,7 @@ def _xlsx(snapshot: dict[str, Any], rows: list[dict[str, Any]]) -> bytes:
             ["Timezone", bounds.get("timezone")], ["Step seconds", bounds.get("step_seconds")],
             ["Rate window", bounds.get("window")], ["Percentile", bounds.get("percentile")],
             ["View scope", bounds.get("scope")], ["Adapter", json.dumps(snapshot.get("adapter", {}), ensure_ascii=False)],
+            ["Scale gate policy", json.dumps(snapshot.get("scale_gate", {}), ensure_ascii=False)],
             ["Registry version", snapshot.get("registry_version")], ["Evidence note", snapshot.get("evidence_note")],
         ]
         add_sheet("Metadata", ["Property", "Value"], metadata)
@@ -255,6 +330,34 @@ def _pdf(snapshot: dict[str, Any]) -> bytes:
         styles["BodyText"],
     ))
     content.append(Spacer(1, 12))
+    gate = snapshot.get("scale_gate", {})
+    content.append(Paragraph("Two-metric scale gate", styles["Heading2"]))
+    slo_status = "marked confirmed by the user" if not gate.get("queue_slo_is_provisional", True) else "provisional"
+    content.append(Paragraph(
+        f"Service aggregate over {gate.get('windows', 3)} completed {gate.get('window_seconds', 900) // 60}-minute windows. "
+        f"Queue P95 SLO: {gate.get('queue_slo_seconds', 0.5)} seconds ({slo_status}). Queue review floor: "
+        f"{gate.get('queue_min_observations', 30)} observations per window. The queue rule requires all three windows to exceed the SLO; "
+        "the preemption signal is recurrent when events are greater than zero in at least two of three windows. "
+        "These are review signals, not automatic scaling or proof of a GPU bottleneck.",
+        styles["BodyText"],
+    ))
+    gate_data = [["Deployment", "Window end (UTC)", "Queue P95 (s)", "Observations", "Preemptions / 15m"]]
+    for deployment, timestamp, queue_p95, observations, preemptions, _, _ in _scale_gate_rows(snapshot):
+        gate_data.append([
+            deployment, datetime.fromtimestamp(timestamp, UTC).isoformat().replace("+00:00", "Z"),
+            "—" if queue_p95 is None else f"{queue_p95:.4g}",
+            "—" if observations is None else f"{observations:.4g}",
+            "—" if preemptions is None else f"{preemptions:.4g}",
+        ])
+    if len(gate_data) == 1:
+        gate_data.append(["—", "—", "—", "—", "—"])
+    gate_table = Table(gate_data, repeatRows=1, colWidths=[115, 120, 75, 85, 90])
+    gate_table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#eeeeee")),
+        ("GRID", (0, 0), (-1, -1), 0.35, colors.HexColor("#bbbbbb")),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"), ("FONTSIZE", (0, 0), (-1, -1), 7),
+    ]))
+    content.extend([gate_table, Spacer(1, 12)])
     data = [["Rank / ID", "Capacity signal", "Workload", "Value", "Unit", "Window / scope", "State", "Evidence / note"]]
     for rank, metric_id in enumerate(TOP10_IDS, start=1):
         metric = snapshot.get("metrics", {}).get(str(metric_id), {})
