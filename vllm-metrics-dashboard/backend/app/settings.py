@@ -28,6 +28,7 @@ class Settings:
     query_timeout_seconds: float
     max_concurrency: int
     max_points_per_series: int
+    max_scale_gate_points: int
     max_series_per_chart: int
     max_discovery_series: int
     max_export_rows: int
@@ -85,6 +86,7 @@ class Settings:
             query_timeout_seconds=float(os.getenv("QUERY_TIMEOUT_SECONDS", "15")),
             max_concurrency=int(os.getenv("UPSTREAM_CONCURRENCY", "6")),
             max_points_per_series=int(os.getenv("MAX_POINTS_PER_SERIES", "2000")),
+            max_scale_gate_points=int(os.getenv("MAX_SCALE_GATE_POINTS", "25000")),
             max_series_per_chart=int(os.getenv("MAX_SERIES_PER_CHART", "100")),
             max_discovery_series=int(os.getenv("MAX_DISCOVERY_SERIES", "2000")),
             max_export_rows=int(os.getenv("MAX_EXPORT_ROWS", "500000")),

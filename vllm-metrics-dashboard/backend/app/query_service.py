@@ -13,6 +13,13 @@ from .discovery import discover_workloads
 from .monitoring import MonitoringError, monitoring
 from .promql import QueryUnavailable, compile_query, metric_selector_for_capability, promql_string
 from .registry import BY_ID, DEFAULT_QUERY_IDS, HISTOGRAM_COUNT_METRICS, METRICS
+from .scale_gate import (
+    DEFAULT_POLICY as DEFAULT_SCALE_GATE_POLICY,
+    INPUT_METRICS as SCALE_GATE_INPUTS,
+    build_gate_queries,
+    evaluate_workload,
+    policy_id as scale_gate_policy_id,
+)
 from .settings import settings
 from .time_utils import daily_intervals
 
@@ -61,11 +68,72 @@ def _coverage(series: list[dict[str, Any]], step: int, end: datetime) -> dict[st
     }
 
 
+async def _scale_gate_inputs(
+    scope: dict[str, Any],
+    *,
+    start: datetime,
+    end: datetime,
+    policy: dict[str, Any],
+    selected_filters: dict[str, str | None],
+) -> dict[str, Any]:
+    """Capture fixed-policy, per-pod gate inputs on its own evaluation grid."""
+    step = int(policy["evaluation_step_seconds"])
+    latency_window = int(str(policy["latency_window"]).removesuffix("m")) * 60
+    queue_window = int(str(policy["queue_window"]).removesuffix("m")) * 60
+    warmup = max(latency_window, queue_window) + int(policy["hold_seconds"])
+    first = math.floor((start.timestamp() - warmup) / step) * step
+    last = math.floor(end.timestamp() / step) * step
+    point_count = max(0, int((last - first) / step) + 1)
+    empty = {
+        name: {"state": "not_queried", "reason": None, "query": None, "series": []}
+        for name in SCALE_GATE_INPUTS
+    }
+    if point_count == 0:
+        reason = "The selected range has no complete scale-gate evaluation points."
+        return {"inputs": {name: {**item, "state": "no_observations", "reason": reason} for name, item in empty.items()}, "step_seconds": step, "warmup_seconds": warmup, "range_start": first, "range_end": last}
+    if point_count > settings.max_scale_gate_points:
+        reason = f"The fixed {step}-second gate grid exceeds the configured {settings.max_scale_gate_points:,}-point limit. Narrow the selected range or choose a coarser evaluation step."
+        return {"inputs": {name: {**item, "state": "query_error", "reason": reason} for name, item in empty.items()}, "step_seconds": step, "warmup_seconds": warmup, "range_start": first, "range_end": last}
+
+    try:
+        queries = build_gate_queries(scope, policy, selected_filters)
+    except (QueryUnavailable, ValueError, AssertionError) as exc:
+        reason = str(exc)
+        return {
+            "inputs": {name: {**item, "state": "query_error", "reason": reason} for name, item in empty.items()},
+            "step_seconds": step, "warmup_seconds": warmup, "range_start": first, "range_end": last,
+        }
+
+    async def run(name: str) -> tuple[str, dict[str, Any]]:
+        query = queries[name]
+        try:
+            payload = await monitoring.query_range(query, start=first, end=last, step=step)
+            raw_results = payload.get("data", {}).get("result", [])
+            if len(raw_results) > settings.max_series_per_chart:
+                return name, {"state": "query_error", "reason": "Gate input exceeded the configured series limit.", "query": query, "series": []}
+            series = [_matrix_series(item, scope["deployment"], scope["model_name"]) for item in raw_results]
+            if any(len(item["points"]) > settings.max_scale_gate_points for item in series):
+                return name, {"state": "query_error", "reason": "Gate input exceeded the configured point limit.", "query": query, "series": []}
+            state = "valid" if series else "no_observations"
+            reason = None if series else "No samples were returned for this gate input in the selected range."
+            return name, {"state": state, "reason": reason, "query": query, "series": series}
+        except MonitoringError as exc:
+            return name, {"state": exc.state, "reason": str(exc), "query": query, "series": []}
+        except (QueryUnavailable, ValueError, AssertionError) as exc:
+            return name, {"state": "query_error", "reason": str(exc), "query": query, "series": []}
+
+    values = await asyncio.gather(*(run(name) for name in SCALE_GATE_INPUTS))
+    return {
+        "inputs": dict(values), "step_seconds": step, "warmup_seconds": warmup,
+        "range_start": first, "range_end": last,
+    }
+
+
 def _empty_snapshot(
     *, namespace: str, model_id: str, identity: dict[str, str] | None, start: datetime, end: datetime,
     zone: Any, ids: list[int], view_scope: str, window: str, percentile: int,
     selected_filters: dict[str, str | None], revision: str | None, discovery: dict[str, Any],
-    queue_slo_seconds: float, queue_min_observations: int, queue_slo_confirmed: bool,
+    scale_gate_policy: dict[str, Any],
 ) -> dict[str, Any]:
     from .time_utils import choose_step
 
@@ -104,12 +172,13 @@ def _empty_snapshot(
         },
         "registry_version": "1.1.0",
         "scale_gate": {
-            "window_seconds": 900,
-            "windows": 3,
-            "scope": "service",
-            "queue_slo_seconds": queue_slo_seconds,
-            "queue_min_observations": queue_min_observations,
-            "queue_slo_is_provisional": not queue_slo_confirmed,
+            "policy_id": scale_gate_policy_id(scale_gate_policy),
+            "policy_version": "four-metric-review-gate-v1",
+            "policy": scale_gate_policy,
+            "scope": "per_pod",
+            "inputs": [],
+            "workloads": [],
+            "warmup_available": False,
         },
         "adapter": {"metric_prefix": "vllm:", "namespace_label": "namespace", "model_label": "model_name", "pod_label": "pod", "instance_label": "instance"},
         "metrics": metrics,
@@ -138,120 +207,6 @@ def _count_query(
 
     scoped = selector(metric, scope, optional=selected_filters)
     return f"sum by ({_group_labels(view_scope)}) (increase({scoped}[{duration_seconds}s]))"
-
-
-def _scale_gate_bounds(start: datetime, end: datetime, spec: Any) -> tuple[datetime, datetime, int] | None:
-    """Return all complete, non-overlapping gate windows inside the selected range."""
-    if not spec.evaluation_window or not spec.evaluation_windows:
-        return None
-    seconds = 900 if spec.evaluation_window == "15m" else None
-    if seconds is None:
-        return None
-    # Each point is an increase/quantile over [timestamp - 15m, timestamp].
-    # Start at the first aligned endpoint whose whole window is inside the range.
-    epoch = datetime(1970, 1, 1, tzinfo=UTC)
-    window_microseconds = seconds * 1_000_000
-
-    def to_epoch_microseconds(value: datetime) -> int:
-        delta = value - epoch
-        return (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
-
-    start_us = to_epoch_microseconds(start)
-    end_us = to_epoch_microseconds(end)
-    first_us = ((start_us + window_microseconds + window_microseconds - 1) // window_microseconds) * window_microseconds
-    latest_us = (end_us // window_microseconds) * window_microseconds
-    if first_us > latest_us:
-        return None
-    first = first_us // 1_000_000
-    latest = latest_us // 1_000_000
-    return (
-        datetime.fromtimestamp(first, UTC),
-        datetime.fromtimestamp(latest, UTC),
-        seconds,
-    )
-
-
-async def _scale_gate_data(
-    spec: Any,
-    scope: dict[str, Any],
-    *,
-    start: datetime,
-    end: datetime,
-    selected_filters: dict[str, str | None],
-) -> dict[str, Any]:
-    empty = {
-        "scale_gate_series": [],
-        "scale_gate_observations": [],
-        "scale_gate_query": None,
-        "scale_gate_observation_query": None,
-        "scale_gate_reason": None,
-    }
-    if spec.id not in {1, 2}:
-        return empty
-    bounds = _scale_gate_bounds(start, end, spec)
-    if bounds is None:
-        return {**empty, "scale_gate_reason": "The selected range does not contain a complete 15-minute window."}
-
-    gate_start, gate_end, step = bounds
-    from .promql import compile_query, selector
-
-    try:
-        candidates = (spec.metric, *spec.metric_aliases)
-        query = None
-        payload: dict[str, Any] = {}
-        for metric_name in candidates:
-            if not metric_name:
-                continue
-            candidate = replace(spec, metric=metric_name)
-            candidate_query = compile_query(
-                candidate,
-                scope,
-                view_scope="service",
-                window=spec.evaluation_window,
-                percentile=95,
-                selected_filters=selected_filters,
-            )
-            candidate_payload = await monitoring.query_range(
-                candidate_query,
-                start=gate_start.timestamp(),
-                end=gate_end.timestamp(),
-                step=step,
-            )
-            query = candidate_query
-            payload = candidate_payload
-            if candidate_payload.get("data", {}).get("result", []):
-                break
-        raw_results = payload.get("data", {}).get("result", [])
-        series = [_matrix_series(item, scope["deployment"], scope["model_name"]) for item in raw_results]
-        result = {**empty, "scale_gate_series": series, "scale_gate_query": query}
-        if spec.id == 1:
-            count_name = HISTOGRAM_COUNT_METRICS[spec.metric]
-            count_selector = selector(
-                "vllm:" + count_name,
-                scope,
-                optional=selected_filters,
-            )
-            observation_query = (
-                f"sum by ({_group_labels('service')}) "
-                f"(increase({count_selector}[{spec.evaluation_window}]))"
-            )
-            count_payload = await monitoring.query_range(
-                observation_query,
-                start=gate_start.timestamp(),
-                end=gate_end.timestamp(),
-                step=step,
-            )
-            count_results = count_payload.get("data", {}).get("result", [])
-            result["scale_gate_observations"] = [
-                _matrix_series(item, scope["deployment"], scope["model_name"])
-                for item in count_results
-            ]
-            result["scale_gate_observation_query"] = observation_query
-        if not series:
-            result["scale_gate_reason"] = "No complete 15-minute gate observations were returned."
-        return result
-    except (MonitoringError, QueryUnavailable, ValueError, AssertionError) as exc:
-        return {**empty, "scale_gate_reason": str(exc)}
 
 
 async def _availability(spec: Any, scope: dict[str, Any], start: datetime, end: datetime) -> str:
@@ -310,9 +265,6 @@ async def _run_one(
         "scale_gate_reason": None,
     }
     try:
-        base.update(await _scale_gate_data(
-            spec, scope, start=start, end=end, selected_filters=selected_filters
-        ))
         query = compile_query(
             spec,
             scope,
@@ -598,14 +550,13 @@ async def build_snapshot(
     view_scope: str,
     window: str,
     percentile: int,
-    queue_slo_seconds: float,
-    queue_min_observations: int,
-    queue_slo_confirmed: bool,
+    scale_gate_policy: dict[str, Any] | None,
     selected_filters: dict[str, str | None],
     revision: str | None,
 ) -> dict[str, Any]:
     from .scopes import decode_scope_id
 
+    gate_policy = {**DEFAULT_SCALE_GATE_POLICY, **(scale_gate_policy or {})}
     discovery = await discover_workloads(namespace, start=start, end=end)
     resolved = [scope for scope in discovery["models"] if scope.get("deployment_resolved")]
     ids = list(dict.fromkeys(metric_ids or DEFAULT_QUERY_IDS))
@@ -630,16 +581,14 @@ async def build_snapshot(
                 namespace=namespace, model_id=model_id, identity=identity, start=start, end=end, zone=zone,
                 ids=ids, view_scope=view_scope, window=window, percentile=percentile,
                 selected_filters=selected_filters, revision=revision, discovery=discovery,
-                queue_slo_seconds=queue_slo_seconds, queue_min_observations=queue_min_observations,
-                queue_slo_confirmed=queue_slo_confirmed,
+                scale_gate_policy=gate_policy,
             )
     if not selected_scopes and model_id == "all":
         return _empty_snapshot(
             namespace=namespace, model_id=model_id, identity=None, start=start, end=end, zone=zone,
             ids=ids, view_scope=view_scope, window=window, percentile=percentile,
             selected_filters=selected_filters, revision=revision, discovery=discovery,
-            queue_slo_seconds=queue_slo_seconds, queue_min_observations=queue_min_observations,
-            queue_slo_confirmed=queue_slo_confirmed,
+            scale_gate_policy=gate_policy,
         )
     for key, value in selected_filters.items():
         if not value:
@@ -664,6 +613,29 @@ async def build_snapshot(
         duplicate_source = next((scope for scope in selected_scopes if len(scope.get("source_values", [])) > 1), None)
         if duplicate_source:
             raise ValueError("Select one monitoring source to avoid duplicate scrape paths for this workload.")
+
+    gate_captures = await asyncio.gather(*(
+        _scale_gate_inputs(
+            scope, start=start, end=end, policy=gate_policy, selected_filters=selected_filters
+        )
+        for scope in selected_scopes
+    ))
+    gate_workloads = []
+    for scope, capture in zip(selected_scopes, gate_captures, strict=True):
+        evaluated = evaluate_workload(
+            deployment=scope["deployment"], model_name=scope["model_name"],
+            expected_pods=[selected_filters["pod"]] if selected_filters.get("pod") else scope.get("pod_names", []),
+            inputs=capture["inputs"],
+            policy=gate_policy, start=start.timestamp(), end=end.timestamp(),
+        )
+        gate_workloads.append({
+            **evaluated,
+            "inputs": capture["inputs"],
+            "step_seconds": capture["step_seconds"],
+            "warmup_seconds": capture["warmup_seconds"],
+            "range_start": capture["range_start"],
+            "range_end": capture["range_end"],
+        })
     duration = (end - start).total_seconds()
     from .time_utils import choose_step
 
@@ -809,12 +781,16 @@ async def build_snapshot(
         },
         "registry_version": "1.1.0",
         "scale_gate": {
-            "window_seconds": 900,
-            "windows": 3,
-            "scope": "service",
-            "queue_slo_seconds": queue_slo_seconds,
-            "queue_min_observations": queue_min_observations,
-            "queue_slo_is_provisional": not queue_slo_confirmed,
+            "policy_id": scale_gate_policy_id(gate_policy),
+            "policy_version": "four-metric-review-gate-v1",
+            "policy": gate_policy,
+            "scope": "per_pod",
+            "inputs": [
+                {"deployment": item["deployment"], "model_name": item["model_name"], "inputs": item["inputs"]}
+                for item in gate_workloads
+            ],
+            "workloads": gate_workloads,
+            "warmup_available": True,
         },
         "adapter": {
             "metric_prefix": "vllm:",

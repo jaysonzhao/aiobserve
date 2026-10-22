@@ -1,25 +1,34 @@
-# Qwen3.8-27B two-metric scale gate: review notes
+# Qwen3.8-27B four-metric scale gate: review notes
 
 ## Decision rule implemented
 
-The dashboard evaluates the service-scoped P95 of `vllm:request_queue_time_seconds` and the increase of the vLLM preemption counter over completed, non-overlapping 15-minute windows. Capacity overview shows the latest three windows at or before the selected snapshot end. The separate Scale gate history view evaluates each rolling 45-minute period in the selected range, advancing by 15 minutes, and highlights periods that meet both signals. A queue gate is met only when all three P95 values exceed the configured queue SLO. The preemption signal is recurrent when the counter increase is greater than zero in at least two of those windows. The queue SLO starts at 0.5 seconds, but is explicitly provisional and editable. Partial 15-minute windows at the range edges are excluded; missing observations never count as zero or as a pass.
+The same-pod rule is evaluated every 30 seconds by default:
 
-The 30-observation setting is an editable low-volume review guard for the queue histogram. It prevents a low-sample P95 from declaring the queue gate met; it is not a statistical-confidence claim. The selected time range must contain the complete 45-minute evidence interval. The gate uses completed window boundaries and does not treat missing observations as zero.
+```text
+latency_breach = TTFT_P95 > TTFT_target OR request_TPOT_P95 > TPOT_target
+capacity_pressure = mean_waiting_requests > waiting_target OR current_KV_fraction > KV_target
+candidate = latency_breach AND capacity_pressure
+capacity_review = candidate remains true continuously for the configured hold
+```
+
+TTFT and request-level TPOT use P95 histogram queries over the configured rolling latency window; each has its own observation floor. Waiting requests use the configured rolling mean summed across engines within a pod. KV occupancy uses the current maximum engine fraction within that pod. The example defaults are TTFT 3 seconds, request TPOT 0.15 seconds/token, mean waiting 5 requests, KV occupancy 0.90, 5-minute latency and queue windows, a 5-minute hold, and a 30-second evaluation step. They are examples, not calibrated product defaults.
+
+All four values must be valid and fresh before either predicate is evaluated. Missing metrics, insufficient histogram counts, stale samples, gaps, or pod identity changes leave the state insufficient and reset hold. Comparisons are strict `>`; a value equal to its target does not breach. Evaluation is per pod, so latency on one pod never joins pressure from another. The application shows a capacity-review signal only; it does not scale replicas.
 
 ## Correctness findings and qualifications
 
-- vLLM documents queue time as time spent in the `WAITING` phase, and currently documents the cumulative preemption counter as `vllm:num_preemptions` ([Production Metrics](https://docs.vllm.ai/en/stable/usage/metrics/)). The connected cluster exports `vllm:num_preemptions_total`; the dashboard keeps that verified name first and falls back to the current documented name. This avoids hiding the cluster's real series while supporting current vLLM versions.
-- The two thresholds and persistence rules are operational policy choices from the brief, not vLLM defaults or a generally standardized scaling rule. The dashboard makes the policy editable and stores it with the exported snapshot.
-- Queue P95 is evidence of scheduler waiting, but a breach alone does not prove GPU compute saturation. Admission limits, scheduling behavior, burst shape and upstream delays can also affect the result. The brief's suggested data-parallel replica is therefore a capacity-review option, not an automatic prescription.
-- vLLM describes preemption as a response to insufficient KV-cache space; preempted requests may be recomputed and latency can worsen. This warrants checking request context lengths, KV headroom and runtime settings. Calling every preemption a “memory defect,” or prescribing TP=2 without a workload/hardware benchmark, overstates the evidence ([Optimization and Tuning](https://docs.vllm.ai/en/stable/configuration/optimization/)).
-- The 0.5-second queue target represents an interactive SLO only if the selected metrics isolate interactive requests. The current dashboard scopes a serving workload and does not infer interactive versus batch class from request behavior. A mixed population can therefore make that target unsuitable until metric labels or separate services distinguish the traffic.
+- vLLM documents `vllm:time_to_first_token_seconds` and `vllm:request_time_per_output_token_seconds` as distinct histograms, `vllm:num_requests_waiting` as a gauge, and `vllm:kv_cache_usage_perc` as a fraction in the 0–1 range ([vLLM metrics](https://docs.vllm.ai/en/v0.31.0/design/metrics/)). A cluster runtime still needs its own family/label compatibility check before live gate results are trusted.
+- Request TPOT is intentionally not substituted with inter-token latency (ITL). vLLM defines request TPOT using request timing and output-token count; single-token requests can contribute zero. Validate the measure against the workload before treating its target as an SLO ([vLLM metrics](https://docs.vllm.ai/en/v0.31.0/design/metrics/)).
+- Red Hat's OpenShift AI guidance emphasizes TTFT and ITL for latency-sensitive workloads and suggests queue-based scaling for uniform workloads; the request-level TPOT gate here is a proposed alternative that requires workload validation ([OpenShift AI 3.5 monitoring guidance](https://docs.redhat.com/en/documentation/red_hat_openshift_ai_self-managed/3.5/html/managing_and_monitoring_models/managing_and_monitoring_models)).
+- The four thresholds, count floors, rolling windows, step, and hold are workload-specific policy inputs, not vLLM or Red Hat defaults. A 30-observation P95 floor is only a review guard; it is not a statistical-confidence claim.
+- A queue or KV breach alone does not prove GPU compute saturation. Admission limits, scheduling, burst shape and upstream delays can also affect the result. Use the gate to prompt investigation, then inspect per-pod routing, readiness, demand and workload context before making capacity changes.
 - The 141 GB premise does not uniquely identify an H200. NVIDIA's supported configuration tables list H20 96 GB and H20 141 GB configurations, while H200 is also listed at 141 GB ([NVIDIA NIM supported models](https://docs.nvidia.com/nim/large-language-models/1.15.0/supported-models.html)). Verify the exact accelerator/SKU and exposed memory from the node before using the brief's hardware premise. NVIDIA specifies 141 GB HBM3e for H200 ([H200 specifications](https://www.nvidia.com/en-au/data-center/h200/)).
 - The Qwen3.8-27B model repository reports about 55.6 GB of files and a native 262,144-token context, with 64 layers ([Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B)). Those facts do not by themselves determine the deployed weight format, effective context, hybrid KV/recurrent-state allocation or usable concurrency. The brief should treat them as model metadata, not a KV-capacity calculation.
 
-## Visual guide page
+## Three dashboard tabs
 
-The Scale gate guide tab shows the three completed 15-minute input windows, the rolling 45-minute evaluation, and the two checks that feed the result. Queue pressure requires all three P95 values to be above the configured SLO with the minimum sample count in every window. KV-cache pressure requires a positive preemption increase in at least two windows. Both checks must pass together; the result asks for human review and does not trigger scaling.
+Capacity overview exposes the four threshold inputs and the latest per-pod values, counts, predicates and state. Scale gate history shows the captured per-pod evaluations, candidate/confirmation milestones and incomplete intervals. Scale gate guide diagrams the four measures, the two OR predicates, the same-pod AND, and the continuous-hold requirement. All three views use the policy hash captured with the snapshot. Editing a policy requires applying a fresh snapshot before history is recalculated.
 
 ## Dashboard interpretation
 
-GPU utilization, allocated VRAM, TTFT, TPOT, token throughput and request lengths remain supporting diagnostics, not gate inputs. If the queue rule is met without recurrent preemptions, review service-level replica capacity after ruling out non-GPU causes. If preemptions recur, investigate KV pressure and runtime configuration. If both signals appear, review both service capacity and memory/configuration. If neither appears, report only that the gate was not met in those windows; this does not prove a single GPU is sufficient for forecast demand.
+The selected-range service-pooled latency metrics, throughput, request lengths, routing and readiness remain supporting evidence. A confirmed state is an advisory classification from monitored signals, not proof of GPU saturation or a replica-count recommendation. Missing or stale evidence must be reported as insufficient rather than interpreted as healthy capacity.

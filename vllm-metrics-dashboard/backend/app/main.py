@@ -18,6 +18,7 @@ from .identity import Actor
 from .monitoring import MonitoringError, monitoring
 from .query_service import build_snapshot
 from .registry import TOP10_IDS, catalog
+from .scale_gate import DEFAULT_POLICY as DEFAULT_SCALE_GATE_POLICY, POLICY_VERSION
 from .scopes import decode_scope_id
 from .settings import settings
 from .snapshots import snapshots
@@ -40,6 +41,20 @@ async def get_namespaces(actor: Actor = Depends(request_actor)) -> dict[str, Any
     return {"namespaces": authorized}
 
 
+class ScaleGatePolicyRequest(BaseModel):
+    ttft_target_seconds: float = Field(default=3.0, gt=0, le=3600)
+    tpot_target_seconds_per_token: float = Field(default=0.15, gt=0, le=3600)
+    waiting_target_requests: float = Field(default=5.0, ge=0, le=1_000_000)
+    kv_target_fraction: float = Field(default=0.90, ge=0, le=1)
+    latency_window: Literal["1m", "2m", "5m", "10m", "15m"] = "5m"
+    queue_window: Literal["1m", "2m", "5m", "10m", "15m"] = "5m"
+    hold_seconds: int = Field(default=300, ge=0, le=3600)
+    evaluation_step_seconds: Literal[30, 60, 120, 300] = 30
+    ttft_min_observations: int = Field(default=30, ge=1, le=1_000_000)
+    tpot_min_observations: int = Field(default=30, ge=1, le=1_000_000)
+    max_sample_age_seconds: int = Field(default=60, ge=1, le=3600)
+
+
 class QueryBody(BaseModel):
     namespace: str = Field(min_length=1, max_length=63, pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
     model_id: str = Field(min_length=1, max_length=4096)
@@ -50,9 +65,7 @@ class QueryBody(BaseModel):
     scope: Literal["pod", "service"] = "pod"
     window: Literal["1m", "2m", "5m", "10m", "15m", "30m", "1h", "24h"] = "5m"
     percentile: Literal[50, 90, 95, 99] = 95
-    queue_slo_seconds: float = Field(default=0.5, gt=0, le=3600)
-    queue_min_observations: int = Field(default=30, ge=1, le=1_000_000)
-    queue_slo_confirmed: bool = False
+    scale_gate_policy: ScaleGatePolicyRequest = Field(default_factory=ScaleGatePolicyRequest)
     selectors: dict[str, str | None] = Field(default_factory=dict)
     revision: str | None = Field(default=None, max_length=120)
 
@@ -104,12 +117,10 @@ async def get_catalog(actor: Actor = Depends(request_actor)) -> dict[str, Any]:
         "top10_ids": list(TOP10_IDS),
         "registry_version": "1.1.0",
         "scale_gate": {
-            "window_seconds": 900,
-            "windows": 3,
-            "scope": "service",
-            "queue_slo_default_seconds": 0.5,
-            "queue_observation_review_floor": 30,
-            "queue_slo_is_provisional": True,
+            "policy_version": POLICY_VERSION,
+            "policy_defaults": DEFAULT_SCALE_GATE_POLICY,
+            "scope": "per_pod",
+            "calibration_status": "example_uncalibrated",
         },
     }
 
@@ -178,9 +189,7 @@ async def query_dashboard(
             view_scope=body.scope,
             window=body.window,
             percentile=body.percentile,
-            queue_slo_seconds=body.queue_slo_seconds,
-            queue_min_observations=body.queue_min_observations,
-            queue_slo_confirmed=body.queue_slo_confirmed,
+            scale_gate_policy=body.scale_gate_policy.model_dump(),
             selected_filters={key: value for key, value in body.selectors.items() if value},
             revision=body.revision,
         )
@@ -210,8 +219,7 @@ async def daily_tokens(
         result = await build_snapshot(
             namespace=body.namespace, model_id=body.model_id, start=start, end=end, zone=zone,
             metric_ids=[34, 35], view_scope=body.scope, window=body.window, percentile=body.percentile,
-            queue_slo_seconds=body.queue_slo_seconds, queue_min_observations=body.queue_min_observations,
-            queue_slo_confirmed=body.queue_slo_confirmed,
+            scale_gate_policy=body.scale_gate_policy.model_dump(),
             selected_filters={key: value for key, value in body.selectors.items() if value}, revision=body.revision,
         )
     except TimeRangeError as exc:
