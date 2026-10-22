@@ -40,6 +40,12 @@ type Snapshot = {
 };
 
 const REQ = { "Content-Type": "application/json", "X-Requested-With": "vllm-metrics-dashboard" };
+const SECTION_METRIC_IDS: Record<string, number[]> = {
+  latency: [1, 3, 4, 5, 6, 7, 8, 9, 29, 30, 31, 39],
+  queues: [2, 10, 11, 12, 13, 14, 15, 16, 17, 18, 32, 33],
+  traffic: [19, 20, 21, 22, 23, 24, 25, 28, 34, 35, 36],
+  reliability: [26, 27, 37, 38, 39, 40, 41],
+};
 
 function statusLabel(state?: string) {
   return ({ valid: "Available", valid_zero: "Valid zero", stale: "Stale", no_observations: "No observations", not_exported: "Not exported", not_authorized: "Not authorized", query_error: "Query error", configuration_required: "Configure capability", unavailable: "Unavailable" } as Record<string, string>)[state || ""] || "Not queried";
@@ -197,7 +203,23 @@ function App() {
     return Object.fromEntries(Object.entries(field).map(([key, property]) => [key, [...new Set(selectedModels.flatMap((item) => (item[property] as string[]) || []))].sort()])) as Record<string, string[]>;
   }, [selectedModels]);
   const orderedTop = TOP10_IDS.map((id) => snapshot?.metrics[String(id)]).filter(Boolean) as MetricResult[];
-  const allMetrics = catalog.map((item) => ({ ...item, ...(snapshot?.metrics[String(item.id)] || {}) })) as MetricResult[];
+  const allMetrics = catalog.map((item) => {
+    const captured = snapshot?.metrics[String(item.id)];
+    return {
+      ...item,
+      ...(captured || {}),
+      state: captured?.state || item.state || "not_queried",
+      reason: captured ? captured.reason : "Not included in this snapshot. Select this section to query the metric.",
+      series: captured?.series || [],
+      summary: captured?.summary || [],
+      selected_range_total: captured?.selected_range_total || [],
+      observations: captured?.observations || [],
+      coverage: captured?.coverage || [],
+      queries: captured?.queries || [],
+      warnings: captured?.warnings || [],
+      scope_states: captured?.scope_states || [],
+    };
+  }) as MetricResult[];
 
   useEffect(() => {
     fetch("/api/v1/catalog").then((response) => response.ok ? response.json() : Promise.reject(new Error("Could not load metric catalog."))).then((data) => setCatalog(data.metrics)).catch((reason) => setError(reason.message));
@@ -239,7 +261,7 @@ function App() {
     controller.current?.abort();
   };
 
-  const runQuery = async (metricIds?: number[], rangeStart = start, rangeEnd = end) => {
+  const runQuery = async (metricIds?: number[], rangeStart = start, rangeEnd = end, returnToTab?: string) => {
     if (!namespace) { setError("Choose an authorized namespace first."); return; }
     if (!modelId) { setError("Choose a served model or explicitly select All resolved workloads."); return; }
     setBusy(true); setError(""); setMessage("");
@@ -248,7 +270,10 @@ function App() {
     const revision = crypto.randomUUID();
     revisionRef.current = revision;
     try {
-      const body = { namespace, model_id: modelId, start: wallTimeToIso(rangeStart, timezone), end: wallTimeToIso(rangeEnd, timezone), timezone, scope, window, percentile, selectors, metric_ids: metricIds, revision };
+      const capturedIds = Object.keys(snapshot?.metrics || {}).map(Number);
+      const activeSectionIds = SECTION_METRIC_IDS[tab] || [];
+      const requestedIds = metricIds || (snapshot ? [...new Set([...TOP10_IDS, ...capturedIds, ...activeSectionIds])] : undefined);
+      const body = { namespace, model_id: modelId, start: wallTimeToIso(rangeStart, timezone), end: wallTimeToIso(rangeEnd, timezone), timezone, scope, window, percentile, selectors, metric_ids: requestedIds, revision };
       const response = await fetch("/api/v1/query", { method: "POST", headers: REQ, body: JSON.stringify(body), signal: abort.signal });
       const data = await response.json();
       if (!response.ok) throw new Error(data.detail || "Metric query failed.");
@@ -257,10 +282,19 @@ function App() {
       const params = new URLSearchParams({ namespace, start: rangeStart, end: rangeEnd, timezone, model: modelId, scope, window, percentile: String(percentile) });
       for (const [key, value] of Object.entries(selectors)) if (value) params.set(key, value);
       history.replaceState(null, "", `${location.pathname}?${params}`);
-      setTab("overview"); setMessage(`Snapshot captured ${new Date(data.created_utc).toLocaleString()} · ${data.filters.models.length} workload${data.filters.models.length === 1 ? "" : "s"}`);
+      setTab(returnToTab || "overview"); setMessage(`Snapshot captured ${new Date(data.created_utc).toLocaleString()} · ${data.filters.models.length} workload${data.filters.models.length === 1 ? "" : "s"}`);
     } catch (reason) {
       if ((reason as Error).name !== "AbortError") setError((reason as Error).message);
     } finally { if (controller.current === abort) setBusy(false); }
+  };
+
+  const selectSection = (section: string) => {
+    setTab(section);
+    const requested = SECTION_METRIC_IDS[section];
+    if (!snapshot || dirty || !requested) return;
+    const captured = Object.keys(snapshot.metrics).map(Number);
+    if (requested.every((id) => captured.includes(id))) return;
+    void runQuery([...new Set([...TOP10_IDS, ...captured, ...requested])], start, end, section);
   };
 
   const setPreset = (hours: number) => {
@@ -274,8 +308,8 @@ function App() {
       const nextEnd = localInput(endDate, timezone);
       const nextStart = localInput(new Date(endDate.getTime() - presetHours * 3600000), timezone);
       setStart(nextStart); setEnd(nextEnd);
-      void runQuery(undefined, nextStart, nextEnd);
-    } else void runQuery();
+      void runQuery(undefined, nextStart, nextEnd, tab);
+    } else void runQuery(undefined, start, end, tab);
   };
   refreshRef.current = refreshNow;
 
@@ -287,7 +321,7 @@ function App() {
 
   const captureAll = async () => {
     setPaused(true);
-    await runQuery(Array.from({ length: 41 }, (_, index) => index + 1));
+    await runQuery(Array.from({ length: 41 }, (_, index) => index + 1), start, end, "catalog");
   };
 
   const changeNamespace = (value: string) => {
@@ -344,7 +378,7 @@ function App() {
       {message && <div className="notice"><span className="notice-icon">i</span><span>{message}</span><button onClick={() => setMessage("")}>×</button></div>}
       {!snapshot ? <section className="empty-state"><div className="empty-icon">▥</div><h2>Capture a metrics snapshot</h2><p>Choose an authorized namespace, review the discovered vLLM workloads, then apply filters to query the monitoring data.</p><div className="empty-points"><span>✓ Read-only PromQL</span><span>✓ Missing data stays explicit</span><span>✓ Exportable snapshot</span></div></section> : <>
         <section className="snapshot-bar"><div className="snapshot-title"><span className="snapshot-check">✓</span><div><b>{dirty ? "Showing previous snapshot" : "Snapshot ready"}</b><span>{snapshot.filters.namespace} · {snapshot.filters.range.start_local} — {snapshot.filters.range.end_local} ({snapshot.filters.range.timezone}) · {snapshot.filters.models.map((model) => `${model.model_name} / ${model.deployment}`).join(", ") || "No resolved workloads"}</span>{dirty && <span className="dirty-note">Filter inputs changed. Charts and exports remain on this captured selection until Apply.</span>}</div></div><div className="snapshot-right"><span>{paused ? "Refresh paused" : `Updated ${lastUpdated}`}</span><button className="button button-quiet" onClick={refreshNow} disabled={busy}>↻ Refresh</button><button className="button button-quiet" onClick={() => void downloadExport("csv")}>↓ Export</button></div></section>
-        <nav className="tabs" aria-label="Dashboard sections">{[["overview", "Capacity overview"], ["latency", "Latency"], ["queues", "Queues & KV"], ["traffic", "Traffic & shape"], ["reliability", "Reliability & replicas"], ["daily", "Daily tokens"], ["catalog", "Metric catalog (41)"]].map(([id, label]) => <button key={id} className={tab === id ? "tab active" : "tab"} onClick={() => setTab(id)}>{label}</button>)}</nav>
+        <nav className="tabs" aria-label="Dashboard sections">{[["overview", "Capacity overview"], ["latency", "Latency"], ["queues", "Queues & KV"], ["traffic", "Traffic & shape"], ["reliability", "Reliability & replicas"], ["daily", "Daily tokens"], ["catalog", "Metric catalog (41)" ]].map(([id, label]) => <button key={id} disabled={busy} className={tab === id ? "tab active" : "tab"} onClick={() => selectSection(id)}>{label}</button>)}</nav>
         {tab === "overview" && <>
           <div className="section-title"><div><h2>Top capacity signals</h2><p>Ten signals selected for model capacity and latency review.</p></div><span className="data-note">{snapshot.filters.range.step_seconds}s query step · {snapshot.filters.range.scope} scope</span></div>
           <div className="metric-grid">{orderedTop.map((metric) => <article className="metric-card" key={metric.id}>
@@ -357,10 +391,10 @@ function App() {
           <section className="capacity-summary"><div><b>Read the signals together</b><span>Compare queue growth, per-pod latency, KV occupancy, preemptions, and output throughput at the same interval. A throughput plateau is useful evidence when demand or backlog is rising.</span></div><span className="capacity-tag">No autoscaling action is taken</span></section>
           <section className="wide-card"><div className="wide-card-title"><div><h3>Input and output token throughput</h3><p>Separate rate series for the selected vLLM engine workloads.</p></div></div><div className="wide-charts">{[20, 21].map((id) => { const metric = currentMetric(snapshot, id); return metric ? <div className="wide-chart" key={id}><div className="chart-label">{metric.name} <span>{statusLabel(metric.state)}</span></div>{metric.series.length ? <MetricChart metric={metric} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} /> : <div className="chart-empty">{metric.reason}</div>}</div> : null; })}</div></section>
         </>}
-        {tab === "latency" && <MetricSection metrics={allMetrics.filter((metric) => [1, 3, 4, 5, 6, 7, 8, 9, 29, 30, 31, 39].includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
-        {tab === "queues" && <MetricSection metrics={allMetrics.filter((metric) => [2, 10, 11, 12, 13, 14, 15, 16, 17, 18, 32, 33].includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
-        {tab === "traffic" && <MetricSection metrics={allMetrics.filter((metric) => [19, 20, 21, 22, 23, 24, 25, 28, 34, 35, 36].includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
-        {tab === "reliability" && <MetricSection metrics={allMetrics.filter((metric) => [26, 27, 37, 38, 39, 40, 41].includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
+        {tab === "latency" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.latency.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
+        {tab === "queues" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.queues.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
+        {tab === "traffic" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.traffic.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
+        {tab === "reliability" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.reliability.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
         {tab === "daily" && <DailyTokens snapshot={snapshot} />}
         {tab === "catalog" && <Catalog metrics={allMetrics} expanded={expanded} setExpanded={setExpanded} onCaptureAll={captureAll} busy={busy} />}
         <footer className="dashboard-footer"><span>{snapshot.evidence_note}</span><div>{(["csv", "json", "xlsx", "pdf"] as const).map((format) => <button key={format} onClick={() => void downloadExport(format)}>{format.toUpperCase()}</button>)}</div></footer>

@@ -14,7 +14,7 @@ Live discovery found vLLM engine metric series in namespace `llm` for:
 - `redhataiqwen25-7b-instruct`
 - `redhataiqwen25-7b-instruct-vll`
 
-Kubernetes pod owner references resolve these to the KServe engine Deployments. The app queries raw `vllm:` families only. It does not combine them with `vllm_`, `kserve_vllm:`, llm-d, EPP, or WVA metrics. Admission rejection, HTTP handler, and kube-state-metrics replica families were not established during discovery; those entries remain conditional and show unavailable states rather than zero. The app and manifests have not been applied to the cluster.
+Kubernetes pod owner references resolve these to the KServe engine Deployments. The app queries raw `vllm:` families only. It does not combine them with `vllm_`, `kserve_vllm:`, llm-d, EPP, or WVA metrics. Admission rejection, HTTP handler, and kube-state-metrics replica families were not established during discovery; those entries remain conditional and show unavailable states rather than zero. The dashboard is deployed to the target cluster; see Validation notes for the live smoke test.
 
 ## Features
 
@@ -64,7 +64,7 @@ To run a local authenticated UI against a cluster, configure a local Thanos port
 
 ## Build and deploy to OpenShift
 
-These commands are provided for an operator to review and run. The branch creation task did not apply cluster resources.
+Use these commands to build and deploy this package after reviewing the target cluster's namespace, monitoring endpoint, and RBAC choices.
 
 1. Build the image into the `llm` namespace's internal image registry:
 
