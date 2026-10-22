@@ -4,7 +4,7 @@ This folder contains an offline Dockerfile and a Kustomize overlay for deploying
 
 The offline Dockerfile installs Python requirements only from `python-wheelhouse/`, which is populated on a connected preparation host. The frontend bundle is built before transfer. The Python base image and OAuth proxy image are carried as OCI archives. In the disconnected environment, load those archives, build the dashboard image without pulling, then push both workload images to a registry reachable by the cluster.
 
-The overlay points both containers directly at that registry. It does not require a cluster-wide image mirror policy. The registry must be reachable by every cluster node and trusted by the cluster. The `llm` namespace must already exist. Applying the overlay also creates two cluster-scoped RoleBindings, so use an identity authorized to create them.
+The overlay defaults to the published Quay images used by the connected deployment. For a cluster that cannot reach Quay, edit both image references in `deployment.patch.yaml` to point to images pushed to a registry reachable by every cluster node and trusted by the cluster. This does not require a cluster-wide image mirror policy. The `llm` namespace must already exist. Applying the overlay also creates two cluster-scoped RoleBindings, so use an identity authorized to create them.
 
 ## 1. Prepare offline build inputs on a connected host
 
@@ -67,7 +67,7 @@ podman push --authfile /secure/path/registry-auth.json \
 
 ## 3. Point the overlay at the registry and deploy
 
-Edit the two image references in `deployment.patch.yaml` if your registry hostname or repository paths differ. Check the current cluster and namespace, then create the dashboard's private secrets and apply the overlay:
+If the cluster can pull from Quay, the default image references need no change. Otherwise, replace both image references in `deployment.patch.yaml` with the registry paths used above. Check the current cluster and namespace, then create the dashboard's private secrets and apply the overlay:
 
 ```bash
 oc whoami
