@@ -40,7 +40,7 @@ vllm-metrics-dashboard/
 └── README.md
 ```
 
-For restricted or disconnected clusters, use the [disconnected deployment package](disconnected/README.md). It builds the application image on a connected host, mirrors the application and OAuth proxy images to a reachable registry, and applies a separate overlay that points directly at the mirrored images.
+For restricted or disconnected clusters, use the [disconnected deployment package](disconnected/README.md). It includes an offline Dockerfile, image archive transfer steps, and a separate overlay that points directly at images in a registry reachable by the cluster.
 
 ## Local frontend and backend development
 

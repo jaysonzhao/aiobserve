@@ -10,6 +10,6 @@ spec:
     spec:
       containers:
         - name: oauth-proxy
-          image: registry.mirror.example.com/openshift/origin-oauth-proxy:4.20.0
+          image: registry.disconnected.example.com/openshift/origin-oauth-proxy:4.20.0
         - name: dashboard
-          image: registry.mirror.example.com/llm/vllm-metrics-dashboard:1.0.0
+          image: registry.disconnected.example.com/llm/vllm-metrics-dashboard:1.0.0

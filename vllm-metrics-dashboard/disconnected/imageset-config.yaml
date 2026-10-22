@@ -1,8 +1,0 @@
-apiVersion: mirror.openshift.io/v2alpha1
-kind: ImageSetConfiguration
-mirror:
-  additionalImages:
-    # Replace this with the connected staging registry/repository/tag used for the built app image.
-    - name: registry.connected.example.com/llm/vllm-metrics-dashboard:1.0.0
-    # Keep this in sync with the OAuth proxy image in deployment.patch.yaml.
-    - name: quay.io/openshift/origin-oauth-proxy:4.20.0
