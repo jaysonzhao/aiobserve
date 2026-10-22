@@ -1,0 +1,216 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-metrics-dashboard
+  namespace: llm
+data:
+  ALLOWED_NAMESPACES: "llm"
+  DEFAULT_TIMEZONE: "Asia/Hong_Kong"
+  PROMETHEUS_URL: "https://thanos-querier.openshift-monitoring.svc:9091"
+  ALLOWED_PROMETHEUS_HOSTS: "thanos-querier.openshift-monitoring.svc"
+  PROMETHEUS_TOKEN_FILE: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  PROMETHEUS_CA_FILE: "/etc/monitoring-ca/service-ca.crt"
+  KUBERNETES_TOKEN_FILE: "/var/run/secrets/kubernetes.io/serviceaccount/token"
+  KUBERNETES_CA_FILE: "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"
+  KUBERNETES_API_URL: "https://kubernetes.default.svc"
+  MAX_RANGE_DAYS: "31"
+  QUERY_TIMEOUT_SECONDS: "15"
+  UPSTREAM_CONCURRENCY: "6"
+  MAX_POINTS_PER_SERIES: "2000"
+  MAX_SERIES_PER_CHART: "100"
+  MAX_DISCOVERY_SERIES: "2000"
+  MAX_EXPORT_ROWS: "500000"
+  SCRAPE_INTERVAL_SECONDS: "30"
+  MAX_SNAPSHOTS: "20"
+  SNAPSHOT_TTL_SECONDS: "1800"
+  MODEL_SCOPE_OVERRIDES_JSON: "[]"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-metrics-dashboard-ca
+  namespace: llm
+  annotations:
+    service.beta.openshift.io/inject-cabundle: "true"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm-metrics-dashboard
+  namespace: llm
+  labels:
+    app.kubernetes.io/name: vllm-metrics-dashboard
+  annotations:
+    service.beta.openshift.io/serving-cert-secret-name: vllm-metrics-dashboard-proxy-tls
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: vllm-metrics-dashboard
+  ports:
+    - name: https
+      port: 8443
+      targetPort: proxy-https
+      protocol: TCP
+---
+apiVersion: route.openshift.io/v1
+kind: Route
+metadata:
+  name: vllm-metrics-dashboard
+  namespace: llm
+  labels:
+    app.kubernetes.io/name: vllm-metrics-dashboard
+spec:
+  to:
+    kind: Service
+    name: vllm-metrics-dashboard
+  port:
+    targetPort: https
+  tls:
+    termination: reencrypt
+    insecureEdgeTerminationPolicy: Redirect
+  wildcardPolicy: None
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-metrics-dashboard
+  namespace: llm
+  labels:
+    app.kubernetes.io/name: vllm-metrics-dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vllm-metrics-dashboard
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vllm-metrics-dashboard
+    spec:
+      serviceAccountName: vllm-metrics-dashboard
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: oauth-proxy
+          image: quay.io/openshift/origin-oauth-proxy:4.20.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - --https-address=:8443
+            - --provider=openshift
+            - --openshift-service-account=vllm-metrics-dashboard
+            - --upstream=http://127.0.0.1:8000
+            - --tls-cert=/etc/tls/private/tls.crt
+            - --tls-key=/etc/tls/private/tls.key
+            - --cookie-secret-file=/etc/oauth/cookie-secret
+            - --cookie-expire=24h
+            - --cookie-secure=true
+            - --cookie-samesite=lax
+            - --pass-user-headers=true
+            - --pass-access-token=false
+            - --skip-auth-regex=^/(healthz|readyz)$
+            - --email-domain=*
+          ports:
+            - name: proxy-https
+              containerPort: 8443
+              protocol: TCP
+          volumeMounts:
+            - name: proxy-tls
+              mountPath: /etc/tls/private
+              readOnly: true
+            - name: oauth-cookie
+              mountPath: /etc/oauth
+              readOnly: true
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+        - name: dashboard
+          image: image-registry.openshift-image-registry.svc:5000/llm/vllm-metrics-dashboard:latest
+          imagePullPolicy: Always
+          ports:
+            - name: app-http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: vllm-metrics-dashboard
+          env:
+            - name: SCOPE_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: vllm-metrics-dashboard-secrets
+                  key: scope-signing-key
+            - name: TMPDIR
+              value: /tmp
+          volumeMounts:
+            - name: monitoring-ca
+              mountPath: /etc/monitoring-ca
+              readOnly: true
+            - name: app-tmp
+              mountPath: /tmp
+          startupProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=2)
+            periodSeconds: 10
+            timeoutSeconds: 3
+          livenessProbe:
+            exec:
+              command:
+                - python
+                - -c
+                - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=2)
+            periodSeconds: 20
+            timeoutSeconds: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: "1"
+              memory: 768Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        - name: proxy-tls
+          secret:
+            secretName: vllm-metrics-dashboard-proxy-tls
+        - name: oauth-cookie
+          secret:
+            secretName: vllm-metrics-dashboard-secrets
+            items:
+              - key: cookie-secret
+                path: cookie-secret
+        - name: monitoring-ca
+          configMap:
+            name: vllm-metrics-dashboard-ca
+            items:
+              - key: service-ca.crt
+                path: service-ca.crt
+        - name: app-tmp
+          emptyDir:
+            sizeLimit: 256Mi
