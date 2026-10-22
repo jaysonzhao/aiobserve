@@ -141,17 +141,29 @@ def _count_query(
 
 
 def _scale_gate_bounds(start: datetime, end: datetime, spec: Any) -> tuple[datetime, datetime, int] | None:
-    """Return the evaluation range for completed, non-overlapping gate windows."""
+    """Return all complete, non-overlapping gate windows inside the selected range."""
     if not spec.evaluation_window or not spec.evaluation_windows:
         return None
     seconds = 900 if spec.evaluation_window == "15m" else None
     if seconds is None:
         return None
-    latest = int(end.timestamp()) // seconds * seconds
-    first = latest - (spec.evaluation_windows - 1) * seconds
-    # Every evaluated window must lie inside the selected absolute range.
-    if first - seconds < start.timestamp():
+    # Each point is an increase/quantile over [timestamp - 15m, timestamp].
+    # Start at the first aligned endpoint whose whole window is inside the range.
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    window_microseconds = seconds * 1_000_000
+
+    def to_epoch_microseconds(value: datetime) -> int:
+        delta = value - epoch
+        return (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+    start_us = to_epoch_microseconds(start)
+    end_us = to_epoch_microseconds(end)
+    first_us = ((start_us + window_microseconds + window_microseconds - 1) // window_microseconds) * window_microseconds
+    latest_us = (end_us // window_microseconds) * window_microseconds
+    if first_us > latest_us:
         return None
+    first = first_us // 1_000_000
+    latest = latest_us // 1_000_000
     return (
         datetime.fromtimestamp(first, UTC),
         datetime.fromtimestamp(latest, UTC),
@@ -178,7 +190,7 @@ async def _scale_gate_data(
         return empty
     bounds = _scale_gate_bounds(start, end, spec)
     if bounds is None:
-        return {**empty, "scale_gate_reason": "The selected range does not contain three complete 15-minute windows."}
+        return {**empty, "scale_gate_reason": "The selected range does not contain a complete 15-minute window."}
 
     gate_start, gate_end, step = bounds
     from .promql import compile_query, selector

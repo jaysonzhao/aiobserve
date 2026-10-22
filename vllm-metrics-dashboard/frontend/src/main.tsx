@@ -61,8 +61,13 @@ function fmt(value: number | null | undefined, unit = "") {
 function currentMetric(snapshot: Snapshot | null, id: number) { return snapshot?.metrics[String(id)]; }
 
 type ScaleGateWindow = { timestamp: number; queueP95: number | null; queueObservations: number | null; preemptions: number | null };
+type ScaleGateEvaluation = {
+  timestamp: number; windows: ScaleGateWindow[]; complete: boolean; gateMet: boolean; status: string;
+  queueComplete: boolean; queueLowVolume: boolean; queueBreached: boolean; queueOverCount: number;
+  preemptionComplete: boolean; recurrentPreemptions: boolean; preemptionWindows: number;
+};
 type ScaleGateResult = {
-  deployment: string; windows: ScaleGateWindow[]; queueComplete: boolean; queueLowVolume: boolean;
+  deployment: string; windows: ScaleGateWindow[]; history: ScaleGateEvaluation[]; queueComplete: boolean; queueLowVolume: boolean;
   queueBreached: boolean; queueOverCount: number; preemptionComplete: boolean;
   recurrentPreemptions: boolean; preemptionWindows: number; summary: string; detail: string;
 };
@@ -73,26 +78,45 @@ function scaleGateResults(snapshot: Snapshot, queueSlo: number, observationFloor
   const deployments = snapshot.filters.models.map((model) => model.deployment);
   const seriesPoints = (metric: MetricResult | undefined, key: "scale_gate_series" | "scale_gate_observations", deployment: string) =>
     (metric?.[key] || []).filter((series) => series.deployment === deployment).flatMap((series) => series.points);
-  const pointMap = (points: Point[]) => new Map(points.filter((point) => point.value !== null).map((point) => [Math.round(point.timestamp), point.value!]));
+  const pointMap = (points: Point[]) => new Map(points.map((point) => [Math.round(point.timestamp), point.value]));
   return deployments.map((deployment) => {
-    const queueMap = pointMap(seriesPoints(queue, "scale_gate_series", deployment));
-    const countMap = pointMap(seriesPoints(queue, "scale_gate_observations", deployment));
-    const preemptionMap = pointMap(seriesPoints(preemption, "scale_gate_series", deployment));
-    const timestamps = [...new Set([...queueMap.keys(), ...preemptionMap.keys()])].sort((left, right) => left - right).slice(-3);
-    const consecutive = timestamps.length === 3 && timestamps[1] - timestamps[0] === 900 && timestamps[2] - timestamps[1] === 900;
+    const queuePoints = seriesPoints(queue, "scale_gate_series", deployment);
+    const countPoints = seriesPoints(queue, "scale_gate_observations", deployment);
+    const preemptionPoints = seriesPoints(preemption, "scale_gate_series", deployment);
+    const queueMap = pointMap(queuePoints);
+    const countMap = pointMap(countPoints);
+    const preemptionMap = pointMap(preemptionPoints);
+    const timestamps = [...new Set([...queuePoints, ...countPoints, ...preemptionPoints].map((point) => Math.round(point.timestamp)))].sort((left, right) => left - right);
     const windows = timestamps.map((timestamp) => ({
       timestamp,
       queueP95: queueMap.get(timestamp) ?? null,
       queueObservations: countMap.get(timestamp) ?? null,
       preemptions: preemptionMap.get(timestamp) ?? null,
     }));
-    const queueComplete = consecutive && windows.every((window) => window.queueP95 !== null && window.queueObservations !== null);
-    const queueLowVolume = queueComplete && windows.some((window) => (window.queueObservations ?? 0) < observationFloor);
-    const queueBreached = queueComplete && !queueLowVolume && windows.every((window) => (window.queueP95 ?? 0) > queueSlo);
-    const queueOverCount = windows.filter((window) => window.queueP95 !== null && window.queueP95 > queueSlo).length;
-    const preemptionComplete = consecutive && windows.every((window) => window.preemptions !== null);
-    const preemptionWindows = windows.filter((window) => (window.preemptions ?? 0) > 0).length;
-    const recurrentPreemptions = preemptionComplete && preemptionWindows >= 2;
+    const history: ScaleGateEvaluation[] = windows.map((_, index) => {
+      const evidence = windows.slice(Math.max(0, index - 2), index + 1);
+      const consecutive = evidence.length === 3 && evidence[1].timestamp - evidence[0].timestamp === 900 && evidence[2].timestamp - evidence[1].timestamp === 900;
+      const queueComplete = consecutive && evidence.every((window) => window.queueP95 !== null && window.queueObservations !== null);
+      const queueLowVolume = queueComplete && evidence.some((window) => (window.queueObservations ?? 0) < observationFloor);
+      const queueBreached = queueComplete && !queueLowVolume && evidence.every((window) => (window.queueP95 ?? 0) > queueSlo);
+      const queueOverCount = evidence.filter((window) => window.queueP95 !== null && window.queueP95 > queueSlo).length;
+      const preemptionComplete = consecutive && evidence.every((window) => window.preemptions !== null);
+      const preemptionWindows = evidence.filter((window) => (window.preemptions ?? 0) > 0).length;
+      const recurrentPreemptions = preemptionComplete && preemptionWindows >= 2;
+      const gateMet = queueBreached && recurrentPreemptions;
+      const complete = queueComplete && preemptionComplete;
+      const status = gateMet ? "Gate met" : !complete ? "Insufficient data" : queueLowVolume && recurrentPreemptions ? "Preemptions only · low-volume queue" : queueLowVolume ? "Low-volume queue" : queueBreached ? "Queue only" : recurrentPreemptions ? "Preemptions only" : "Neither signal";
+      return { timestamp: evidence.at(-1)!.timestamp, windows: evidence, complete, gateMet, status, queueComplete, queueLowVolume, queueBreached, queueOverCount, preemptionComplete, recurrentPreemptions, preemptionWindows };
+    });
+    const latest = history.at(-1);
+    const latestWindows = windows.slice(-3);
+    const queueComplete = latest?.queueComplete || false;
+    const queueLowVolume = latest?.queueLowVolume || false;
+    const queueBreached = latest?.queueBreached || false;
+    const queueOverCount = latest?.queueOverCount || 0;
+    const preemptionComplete = latest?.preemptionComplete || false;
+    const preemptionWindows = latest?.preemptionWindows || 0;
+    const recurrentPreemptions = latest?.recurrentPreemptions || false;
     const gateReason = [...(queue?.scale_gate_reasons || []), ...(preemption?.scale_gate_reasons || [])]
       .find((item) => item.deployment === deployment)?.reason;
     let summary = "Insufficient data";
@@ -116,7 +140,7 @@ function scaleGateResults(snapshot: Snapshot, queueSlo: number, observationFloor
       summary = "Neither gate met in these windows";
       detail = "This is not proof that one GPU meets future or forecast demand; continue monitoring at representative peak load.";
     }
-    return { deployment, windows, queueComplete, queueLowVolume, queueBreached, queueOverCount, preemptionComplete, recurrentPreemptions, preemptionWindows, summary, detail };
+    return { deployment, windows: latestWindows, history, queueComplete, queueLowVolume, queueBreached, queueOverCount, preemptionComplete, recurrentPreemptions, preemptionWindows, summary, detail };
   });
 }
 
@@ -143,6 +167,35 @@ function ScaleGatePanel({ snapshot, queueSlo, setQueueSlo, observationFloor, set
     </div>)}
     {settingsDirty && <p className="scale-gate-footnote">The edited thresholds are a preview. Apply them to save the policy with this snapshot and its exports.</p>}
     <p className="scale-gate-footnote">The queue gate requires all three P95 values to exceed the editable SLO. The preemption signal is recurrent when more than zero events appear in at least two windows. Preemptions indicate KV-cache pressure and warrant configuration review; neither signal alone proves a specific GPU or tensor-parallel topology is required. Apply an interactive SLO only when the selected metric population is interactive traffic: this view aggregates the selected serving workload and does not infer an interactive/batch split from request behavior.</p>
+  </section>;
+}
+
+function ScaleGateHistoryPanel({ snapshot, results, timezone, settingsDirty }: {
+  snapshot: Snapshot; results: ScaleGateResult[]; timezone: string; settingsDirty: boolean;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const timeLabel = (timestamp: number) => new Intl.DateTimeFormat("en-GB", { timeZone: timezone, dateStyle: "short", timeStyle: "short" }).format(new Date(timestamp * 1000));
+  const gate = snapshot.scale_gate;
+  return <section className="wide-card scale-history" aria-labelledby="scale-history-title">
+    <div className="wide-card-title"><div><h2 id="scale-history-title">Historical scale-gate evaluations</h2><p>Rolling 45-minute evaluations, advancing every 15 minutes across the selected range. A pass requires queue P95 above SLO in all three windows and preemptions in at least two.</p></div><span className="data-note">{snapshot.filters.range.start_local} — {snapshot.filters.range.end_local} · {timezone}</span></div>
+    {settingsDirty && <p className="notice">This preview uses edited gate settings. Apply them from Capacity overview to save the policy with the snapshot.</p>}
+    <div className="scale-history-policy">Queue P95 SLO {fmt(gate?.queue_slo_seconds ?? 0.5, "s")} · minimum observations/window {fmt(gate?.queue_min_observations ?? 30)} · service aggregate</div>
+    {!results.length ? <div className="chart-empty">No resolved workload is available for scale-gate history.</div> : results.map((result) => {
+      const complete = result.history.filter((evaluation) => evaluation.complete);
+      const passes = complete.filter((evaluation) => evaluation.gateMet);
+      const rows = (showAll ? complete : passes).slice().reverse();
+      return <div className="scale-history-result" key={result.deployment}>
+        <div className="scale-history-head"><div><h3>{result.deployment}</h3><p>{passes.length} gate pass{passes.length === 1 ? "" : "es"} across {complete.length} complete rolling evaluation{complete.length === 1 ? "" : "s"} · {result.history.length - complete.length} incomplete</p></div><button className="button button-quiet" onClick={() => setShowAll((value) => !value)}>{showAll ? "Show gate passes only" : "Show all completed evaluations"}</button></div>
+        {rows.length ? <div className="table-scroll scale-history-scroll"><table><thead><tr><th>Rolling 45-minute interval</th><th>Queue P95 · 3 windows</th><th>Queue samples · 3 windows</th><th>Preemptions · 3 windows</th><th>Evaluation</th></tr></thead><tbody>{rows.map((evaluation) => <tr className={evaluation.gateMet ? "gate-history-pass" : ""} key={evaluation.timestamp}>
+          <td>{timeLabel(evaluation.timestamp - 2700)} – {timeLabel(evaluation.timestamp)}</td>
+          <td>{evaluation.windows.map((window) => fmt(window.queueP95, "s")).join(" / ")}</td>
+          <td>{evaluation.windows.map((window) => fmt(window.queueObservations)).join(" / ")}</td>
+          <td>{evaluation.windows.map((window) => fmt(window.preemptions)).join(" / ")}</td>
+          <td><span className={`gate-history-status ${evaluation.gateMet ? "gate-history-status-met" : ""}`}>{evaluation.status}</span></td>
+        </tr>)}</tbody></table></div> : <div className="chart-empty">{complete.length ? "No complete rolling 45-minute interval met the full scale gate in this selected range." : "No complete 45-minute evaluations are available in this selected range."}</div>}
+      </div>;
+    })}
+    <p className="scale-gate-footnote">Only completed evidence is evaluated. Missing metric points and low-volume queue windows do not count as a pass. Historical gate results are observations for review, not proof of GPU saturation or an automatic scaling decision.</p>
   </section>;
 }
 
@@ -477,7 +530,7 @@ function App() {
       {message && <div className="notice"><span className="notice-icon">i</span><span>{message}</span><button onClick={() => setMessage("")}>×</button></div>}
       {!snapshot ? <section className="empty-state"><div className="empty-icon">▥</div><h2>Capture a metrics snapshot</h2><p>Choose an authorized namespace, review the discovered vLLM workloads, then apply filters to query the monitoring data.</p><div className="empty-points"><span>✓ Read-only PromQL</span><span>✓ Missing data stays explicit</span><span>✓ Exportable snapshot</span></div></section> : <>
         <section className="snapshot-bar"><div className="snapshot-title"><span className="snapshot-check">✓</span><div><b>{dirty ? "Showing previous snapshot" : "Snapshot ready"}</b><span>{snapshot.filters.namespace} · {snapshot.filters.range.start_local} — {snapshot.filters.range.end_local} ({snapshot.filters.range.timezone}) · {snapshot.filters.models.map((model) => `${model.model_name} / ${model.deployment}`).join(", ") || "No resolved workloads"}</span>{dirty && <span className="dirty-note">Filter inputs changed. Charts and exports remain on this captured selection until Apply.</span>}</div></div><div className="snapshot-right"><span>{paused ? "Refresh paused" : `Updated ${lastUpdated}`}</span><button className="button button-quiet" onClick={refreshNow} disabled={busy}>↻ Refresh</button><button className="button button-quiet" onClick={() => void downloadExport("csv")}>↓ Export</button></div></section>
-        <nav className="tabs" aria-label="Dashboard sections">{[["overview", "Capacity overview"], ["latency", "Latency"], ["queues", "Queues & KV"], ["traffic", "Traffic & shape"], ["reliability", "Reliability & replicas"], ["daily", "Daily tokens"], ["catalog", `Metric catalog (${catalog.length})` ]].map(([id, label]) => <button key={id} disabled={busy} className={tab === id ? "tab active" : "tab"} onClick={() => selectSection(id)}>{label}</button>)}</nav>
+        <nav className="tabs" aria-label="Dashboard sections">{[["overview", "Capacity overview"], ["gate-history", "Scale gate history"], ["latency", "Latency"], ["queues", "Queues & KV"], ["traffic", "Traffic & shape"], ["reliability", "Reliability & replicas"], ["daily", "Daily tokens"], ["catalog", `Metric catalog (${catalog.length})` ]].map(([id, label]) => <button key={id} disabled={busy} className={tab === id ? "tab active" : "tab"} onClick={() => selectSection(id)}>{label}</button>)}</nav>
         {tab === "overview" && <>
           <div className="section-title"><div><h2>Top capacity signals</h2><p>Ten signals selected for model capacity and latency review.</p></div><span className="data-note">{snapshot.filters.range.step_seconds}s query step · {snapshot.filters.range.scope} scope</span></div>
           <ScaleGatePanel snapshot={snapshot} queueSlo={queueSlo} setQueueSlo={setQueueSlo} observationFloor={observationFloor} setObservationFloor={setObservationFloor} sloConfirmed={sloConfirmed} setSloConfirmed={setSloConfirmed} settingsDirty={queueSlo !== snapshot.scale_gate?.queue_slo_seconds || observationFloor !== snapshot.scale_gate?.queue_min_observations || sloConfirmed === snapshot.scale_gate?.queue_slo_is_provisional} onApply={() => void runQuery()} />
@@ -491,6 +544,7 @@ function App() {
           <section className="capacity-summary"><div><b>Supporting signals remain diagnostic</b><span>TTFT, TPOT, request lengths, KV occupancy and token rates help explain the gate. They do not independently open it; confirm workload and runtime context before choosing capacity or topology.</span></div><span className="capacity-tag">No autoscaling action is taken</span></section>
           <section className="wide-card"><div className="wide-card-title"><div><h3>Input and output token throughput</h3><p>Separate rate series for the selected vLLM engine workloads.</p></div></div><div className="wide-charts">{[20, 21].map((id) => { const metric = currentMetric(snapshot, id); return metric ? <div className="wide-chart" key={id}><div className="chart-label">{metric.name} <span>{statusLabel(metric.state)}</span></div>{metric.series.length ? <MetricChart metric={metric} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} /> : <div className="chart-empty">{metric.reason}</div>}</div> : null; })}</div></section>
         </>}
+        {tab === "gate-history" && <ScaleGateHistoryPanel snapshot={snapshot} results={scaleGateResults(snapshot, queueSlo, observationFloor)} timezone={snapshot.filters.range.timezone} settingsDirty={queueSlo !== snapshot.scale_gate?.queue_slo_seconds || observationFloor !== snapshot.scale_gate?.queue_min_observations || sloConfirmed === snapshot.scale_gate?.queue_slo_is_provisional} />}
         {tab === "latency" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.latency.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
         {tab === "queues" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.queues.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
         {tab === "traffic" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.traffic.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
