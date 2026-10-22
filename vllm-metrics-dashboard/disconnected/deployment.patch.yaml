@@ -1,0 +1,15 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-metrics-dashboard
+  namespace: llm
+  annotations:
+    image.openshift.io/triggers: null
+spec:
+  template:
+    spec:
+      containers:
+        - name: oauth-proxy
+          image: registry.mirror.example.com/openshift/origin-oauth-proxy:4.20.0
+        - name: dashboard
+          image: registry.mirror.example.com/llm/vllm-metrics-dashboard:1.0.0

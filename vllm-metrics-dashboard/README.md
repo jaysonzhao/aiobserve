@@ -35,9 +35,12 @@ vllm-metrics-dashboard/
 ├── backend/tests/           Backend behavior tests
 ├── frontend/src/             React/TypeScript UI, ECharts views, date conversion
 ├── openshift/               OpenShift ServiceAccount, RBAC, Route and Deployment
+├── disconnected/            Image mirroring workflow and disconnected deploy overlay
 ├── Dockerfile               Multi-stage frontend/backend image
 └── README.md
 ```
+
+For restricted or disconnected clusters, use the [disconnected deployment package](disconnected/README.md). It builds the application image on a connected host, mirrors the application and OAuth proxy images to a reachable registry, and applies a separate overlay that points directly at the mirrored images.
 
 ## Local frontend and backend development
 
