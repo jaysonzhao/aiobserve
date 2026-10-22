@@ -61,6 +61,7 @@ async def discover_workloads(
         raise PermissionError("Namespace is outside the configured allowlist.")
     start_ts, end_ts = start.timestamp(), end.timestamp()
     selector = f'{{__name__=~"vllm:.*",namespace={json.dumps(namespace)}}}'
+    metadata_warning = None
     try:
         series_task = monitoring.series(
             selector,
