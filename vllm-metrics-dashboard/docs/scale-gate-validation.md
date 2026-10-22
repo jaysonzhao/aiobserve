@@ -16,6 +16,10 @@ The 30-observation setting is an editable low-volume review guard for the queue 
 - The 141 GB premise does not uniquely identify an H200. NVIDIA's supported configuration tables list H20 96 GB and H20 141 GB configurations, while H200 is also listed at 141 GB ([NVIDIA NIM supported models](https://docs.nvidia.com/nim/large-language-models/1.15.0/supported-models.html)). Verify the exact accelerator/SKU and exposed memory from the node before using the brief's hardware premise. NVIDIA specifies 141 GB HBM3e for H200 ([H200 specifications](https://www.nvidia.com/en-au/data-center/h200/)).
 - The Qwen3.8-27B model repository reports about 55.6 GB of files and a native 262,144-token context, with 64 layers ([Qwen3.8-27B model card](https://huggingface.co/Qwen/Qwen3.8-27B)). Those facts do not by themselves determine the deployed weight format, effective context, hybrid KV/recurrent-state allocation or usable concurrency. The brief should treat them as model metadata, not a KV-capacity calculation.
 
+## Visual guide page
+
+The Scale gate guide tab shows the three completed 15-minute input windows, the rolling 45-minute evaluation, and the two checks that feed the result. Queue pressure requires all three P95 values to be above the configured SLO with the minimum sample count in every window. KV-cache pressure requires a positive preemption increase in at least two windows. Both checks must pass together; the result asks for human review and does not trigger scaling.
+
 ## Dashboard interpretation
 
 GPU utilization, allocated VRAM, TTFT, TPOT, token throughput and request lengths remain supporting diagnostics, not gate inputs. If the queue rule is met without recurrent preemptions, review service-level replica capacity after ruling out non-GPU causes. If preemptions recur, investigate KV pressure and runtime configuration. If both signals appear, review both service capacity and memory/configuration. If neither appears, report only that the gate was not met in those windows; this does not prove a single GPU is sufficient for forecast demand.

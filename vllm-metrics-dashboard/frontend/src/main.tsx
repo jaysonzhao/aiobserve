@@ -199,6 +199,53 @@ function ScaleGateHistoryPanel({ snapshot, results, timezone, settingsDirty }: {
   </section>;
 }
 
+function ScaleGateGuidePage({ queueSlo, observationFloor, sloConfirmed, settingsDirty }: {
+  queueSlo: number; observationFloor: number; sloConfirmed: boolean; settingsDirty: boolean;
+}) {
+  return <section className="wide-card scale-guide" aria-labelledby="scale-guide-title">
+    <div className="wide-card-title"><div><h2 id="scale-guide-title">How the scale gate works</h2><p>Two independent signals must pass in the same rolling evaluation before the dashboard recommends a capacity and KV-cache review.</p></div><span className="capacity-tag">Review only · no scaling action</span></div>
+    {settingsDirty && <p className="notice">The diagram reflects the edited thresholds. Apply them from Capacity overview to save the policy with the snapshot.</p>}
+    <div className="scale-guide-policy">
+      <span>Queue P95 SLO <b>{fmt(queueSlo, "s")}</b> · {sloConfirmed ? "confirmed" : "provisional"}</span>
+      <span>Minimum queue samples <b>{fmt(observationFloor)}</b> per 15-minute window</span>
+      <span>Scope <b>service aggregate</b></span>
+    </div>
+    <div className="scale-guide-diagram" role="group" aria-label="Scale gate evaluation flow diagram">
+      <div className="scale-guide-stage">
+        <div className="scale-guide-step"><span>STEP 1</span><div><h3>Build a rolling evaluation</h3><p>Use completed, aligned, non-overlapping 15-minute metric windows.</p></div></div>
+        <div className="scale-guide-windows">
+          <div className="scale-guide-window"><span>WINDOW 1</span><b>15 minutes</b><small>Queue P95 · sample count · preemptions</small></div>
+          <span className="scale-guide-window-arrow" aria-hidden="true">→</span>
+          <div className="scale-guide-window"><span>WINDOW 2</span><b>15 minutes</b><small>Queue P95 · sample count · preemptions</small></div>
+          <span className="scale-guide-window-arrow" aria-hidden="true">→</span>
+          <div className="scale-guide-window"><span>WINDOW 3</span><b>15 minutes</b><small>Queue P95 · sample count · preemptions</small></div>
+        </div>
+        <div className="scale-guide-bracket"><span>One 45-minute evaluation</span></div>
+        <p className="scale-guide-next">The next evaluation advances by 15 minutes, reusing two windows and adding the next completed window.</p>
+      </div>
+      <div className="scale-guide-drop" aria-hidden="true">↓</div>
+      <div className="scale-guide-step"><span>STEP 2</span><div><h3>Check both signals over those same three windows</h3><p>Each signal uses the selected service workload and current gate thresholds.</p></div></div>
+      <div className="scale-guide-signals">
+        <article className="scale-guide-signal scale-guide-queue">
+          <div className="scale-guide-signal-mark">A</div>
+          <div><div className="eyebrow">QUEUE PRESSURE</div><h3>P95 is above the SLO in all 3 windows</h3><p>Each window must also meet the minimum queue sample count.</p><span className="scale-guide-rule">P95 &gt; {fmt(queueSlo, "s")} · samples ≥ {fmt(observationFloor)} in every window</span></div>
+        </article>
+        <article className="scale-guide-signal scale-guide-kv">
+          <div className="scale-guide-signal-mark">B</div>
+          <div><div className="eyebrow">KV-CACHE PRESSURE</div><h3>Preemptions occur in at least 2 of 3 windows</h3><p>A window counts when its 15-minute preemption increase is greater than zero.</p><span className="scale-guide-rule">Preemptions &gt; 0 · in 2 or more windows</span></div>
+        </article>
+      </div>
+      <div className="scale-guide-join"><span className="scale-guide-and">AND</span><span>Both signals must pass in the same 45-minute evaluation</span></div>
+      <div className="scale-guide-outcome"><div><span className="eyebrow">RESULT</span><h3>Gate met · review capacity and KV-cache configuration</h3><p>This is a review signal. It does not prove GPU saturation or trigger an automatic scaling action.</p></div><span className="scale-guide-check" aria-hidden="true">✓</span></div>
+    </div>
+    <div className="scale-guide-notes">
+      <div><b>Incomplete evidence</b><span>Missing or non-consecutive metric points leave an evaluation incomplete; missing data is never treated as zero.</span></div>
+      <div><b>One signal only</b><span>A queue breach or recurrent preemptions alone does not pass the two-metric gate.</span></div>
+      <div><b>Interpret in context</b><span>The queue target is meaningful for interactive traffic only when the selected metric population represents that workload.</span></div>
+    </div>
+  </section>;
+}
+
 function latestByDeployment(metric: MetricResult) {
   const grouped = new Map<string, number[]>();
   for (const series of metric.series) {
@@ -530,7 +577,7 @@ function App() {
       {message && <div className="notice"><span className="notice-icon">i</span><span>{message}</span><button onClick={() => setMessage("")}>×</button></div>}
       {!snapshot ? <section className="empty-state"><div className="empty-icon">▥</div><h2>Capture a metrics snapshot</h2><p>Choose an authorized namespace, review the discovered vLLM workloads, then apply filters to query the monitoring data.</p><div className="empty-points"><span>✓ Read-only PromQL</span><span>✓ Missing data stays explicit</span><span>✓ Exportable snapshot</span></div></section> : <>
         <section className="snapshot-bar"><div className="snapshot-title"><span className="snapshot-check">✓</span><div><b>{dirty ? "Showing previous snapshot" : "Snapshot ready"}</b><span>{snapshot.filters.namespace} · {snapshot.filters.range.start_local} — {snapshot.filters.range.end_local} ({snapshot.filters.range.timezone}) · {snapshot.filters.models.map((model) => `${model.model_name} / ${model.deployment}`).join(", ") || "No resolved workloads"}</span>{dirty && <span className="dirty-note">Filter inputs changed. Charts and exports remain on this captured selection until Apply.</span>}</div></div><div className="snapshot-right"><span>{paused ? "Refresh paused" : `Updated ${lastUpdated}`}</span><button className="button button-quiet" onClick={refreshNow} disabled={busy}>↻ Refresh</button><button className="button button-quiet" onClick={() => void downloadExport("csv")}>↓ Export</button></div></section>
-        <nav className="tabs" aria-label="Dashboard sections">{[["overview", "Capacity overview"], ["gate-history", "Scale gate history"], ["latency", "Latency"], ["queues", "Queues & KV"], ["traffic", "Traffic & shape"], ["reliability", "Reliability & replicas"], ["daily", "Daily tokens"], ["catalog", `Metric catalog (${catalog.length})` ]].map(([id, label]) => <button key={id} disabled={busy} className={tab === id ? "tab active" : "tab"} onClick={() => selectSection(id)}>{label}</button>)}</nav>
+        <nav className="tabs" aria-label="Dashboard sections">{[["overview", "Capacity overview"], ["gate-history", "Scale gate history"], ["gate-guide", "Scale gate guide"], ["latency", "Latency"], ["queues", "Queues & KV"], ["traffic", "Traffic & shape"], ["reliability", "Reliability & replicas"], ["daily", "Daily tokens"], ["catalog", "Metric catalog (" + catalog.length + ")"]].map(([id, label]) => <button key={id} disabled={busy} className={tab === id ? "tab active" : "tab"} onClick={() => selectSection(id)}>{label}</button>)}</nav>
         {tab === "overview" && <>
           <div className="section-title"><div><h2>Top capacity signals</h2><p>Ten signals selected for model capacity and latency review.</p></div><span className="data-note">{snapshot.filters.range.step_seconds}s query step · {snapshot.filters.range.scope} scope</span></div>
           <ScaleGatePanel snapshot={snapshot} queueSlo={queueSlo} setQueueSlo={setQueueSlo} observationFloor={observationFloor} setObservationFloor={setObservationFloor} sloConfirmed={sloConfirmed} setSloConfirmed={setSloConfirmed} settingsDirty={queueSlo !== snapshot.scale_gate?.queue_slo_seconds || observationFloor !== snapshot.scale_gate?.queue_min_observations || sloConfirmed === snapshot.scale_gate?.queue_slo_is_provisional} onApply={() => void runQuery()} />
@@ -545,6 +592,7 @@ function App() {
           <section className="wide-card"><div className="wide-card-title"><div><h3>Input and output token throughput</h3><p>Separate rate series for the selected vLLM engine workloads.</p></div></div><div className="wide-charts">{[20, 21].map((id) => { const metric = currentMetric(snapshot, id); return metric ? <div className="wide-chart" key={id}><div className="chart-label">{metric.name} <span>{statusLabel(metric.state)}</span></div>{metric.series.length ? <MetricChart metric={metric} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} /> : <div className="chart-empty">{metric.reason}</div>}</div> : null; })}</div></section>
         </>}
         {tab === "gate-history" && <ScaleGateHistoryPanel snapshot={snapshot} results={scaleGateResults(snapshot, queueSlo, observationFloor)} timezone={snapshot.filters.range.timezone} settingsDirty={queueSlo !== snapshot.scale_gate?.queue_slo_seconds || observationFloor !== snapshot.scale_gate?.queue_min_observations || sloConfirmed === snapshot.scale_gate?.queue_slo_is_provisional} />}
+        {tab === "gate-guide" && <ScaleGateGuidePage queueSlo={queueSlo} observationFloor={observationFloor} sloConfirmed={sloConfirmed} settingsDirty={queueSlo !== snapshot.scale_gate?.queue_slo_seconds || observationFloor !== snapshot.scale_gate?.queue_min_observations || sloConfirmed === snapshot.scale_gate?.queue_slo_is_provisional} />}
         {tab === "latency" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.latency.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
         {tab === "queues" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.queues.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
         {tab === "traffic" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.traffic.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}

@@ -19,7 +19,7 @@ Kubernetes pod owner references resolve these to the KServe engine Deployments. 
 ## Features
 
 - Ten ranked capacity signals from catalog IDs `4, 7, 9, 10, 1, 11, 14, 2, 21, 20`, plus the full 41-entry catalog.
-- A separate two-metric scale-review gate: service P95 queue time over three completed 15-minute windows plus recurrent preemptions in at least two windows. Capacity overview shows the latest evaluation; Scale gate history evaluates rolling 45-minute periods throughout the selected range and highlights passes. The 0.5-second queue SLO is provisional and editable; the gate never scales workloads.
+- A separate two-metric scale-review gate: service P95 queue time over three completed 15-minute windows plus recurrent preemptions in at least two windows. Capacity overview shows the latest evaluation; Scale gate history evaluates rolling 45-minute periods throughout the selected range and highlights passes; Scale gate guide diagrams the timing and pass criteria. The 0.5-second queue SLO is provisional and editable; the gate never scales workloads.
 - Namespace, served-model, deployment, pod, instance, job, engine, time range, timezone, percentile, and rate-window filters.
 - Per-pod views and service aggregation. Histograms aggregate buckets before quantile calculation; distinct deployments remain separate.
 - Hong Kong-local calendar-day input and output token estimates, with partial-day labels. Rolling 24-hour counters remain a separate view.
