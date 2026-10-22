@@ -67,17 +67,24 @@ To run a local authenticated UI against a cluster, configure a local Thanos port
 
 ## Build and deploy to OpenShift
 
-Use these commands to build and deploy this package after reviewing the target cluster's namespace, monitoring endpoint, and RBAC choices.
+Use these commands to deploy this package after reviewing the target cluster's namespace, monitoring endpoint, and RBAC choices. The dashboard container uses the published image `quay.io/haotech/metricsweb:latest`.
 
-1. Build the image into the `llm` namespace's internal image registry:
+1. Create the dashboard service account and its namespace-scoped metadata role before linking optional registry credentials:
 
 ```bash
-cd vllm-metrics-dashboard
-oc project llm
-oc get buildconfig vllm-metrics-dashboard >/dev/null 2>&1 || \
-  oc new-build --binary --name=vllm-metrics-dashboard --strategy=docker --to=vllm-metrics-dashboard:latest
-oc start-build vllm-metrics-dashboard --from-dir=. --follow
+oc apply -f openshift/namespace-access.yaml
 ```
+
+If the Quay repository requires authentication, create a pull secret from a protected Docker auth file and link it only to the dashboard service account:
+
+```bash
+oc create secret generic dashboard-registry-pull -n llm \
+  --from-file=.dockerconfigjson=/secure/path/quay-auth.json \
+  --type=kubernetes.io/dockerconfigjson
+oc secrets link vllm-metrics-dashboard dashboard-registry-pull --for=pull -n llm
+```
+
+Skip this step when the Quay repository is public or the pull secret is already linked. Create the secret once; do not commit the auth file or credentials.
 
 2. Create private OAuth cookie and opaque model-scope signing keys. These values are generated locally and are not stored in this repository:
 
@@ -90,7 +97,6 @@ oc create secret generic vllm-metrics-dashboard-secrets -n llm \
 3. Apply workload-scoped metadata RBAC, monitoring access, and the app resources:
 
 ```bash
-oc apply -f openshift/namespace-access.yaml
 oc apply -f openshift/cluster-access.yaml
 oc apply -f openshift/application.yaml
 oc rollout status deployment/vllm-metrics-dashboard -n llm

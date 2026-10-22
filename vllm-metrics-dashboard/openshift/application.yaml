@@ -77,8 +77,6 @@ metadata:
   namespace: llm
   labels:
     app.kubernetes.io/name: vllm-metrics-dashboard
-  annotations:
-    image.openshift.io/triggers: '[{"from":{"kind":"ImageStreamTag","name":"vllm-metrics-dashboard:latest"},"fieldPath":"spec.template.spec.containers[?(@.name==\"dashboard\")].image"}]'
 spec:
   replicas: 1
   selector:
@@ -138,7 +136,7 @@ spec:
             capabilities:
               drop: ["ALL"]
         - name: dashboard
-          image: image-registry.openshift-image-registry.svc:5000/llm/vllm-metrics-dashboard:latest
+          image: quay.io/haotech/metricsweb:latest
           imagePullPolicy: Always
           ports:
             - name: app-http

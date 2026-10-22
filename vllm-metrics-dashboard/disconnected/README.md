@@ -4,7 +4,7 @@ This folder contains an offline Dockerfile and a Kustomize overlay for deploying
 
 The offline Dockerfile installs Python requirements only from `python-wheelhouse/`, which is populated on a connected preparation host. The frontend bundle is built before transfer. The Python base image and OAuth proxy image are carried as OCI archives. In the disconnected environment, load those archives, build the dashboard image without pulling, then push both workload images to a registry reachable by the cluster.
 
-The overlay points both containers directly at that registry and removes the ImageStream trigger. It does not require a cluster-wide image mirror policy. The registry must be reachable by every cluster node and trusted by the cluster. The `llm` namespace must already exist. Applying the overlay also creates two cluster-scoped RoleBindings, so use an identity authorized to create them.
+The overlay points both containers directly at that registry. It does not require a cluster-wide image mirror policy. The registry must be reachable by every cluster node and trusted by the cluster. The `llm` namespace must already exist. Applying the overlay also creates two cluster-scoped RoleBindings, so use an identity authorized to create them.
 
 ## 1. Prepare offline build inputs on a connected host
 
@@ -95,7 +95,7 @@ The registry CA and node trust configuration must already be installed by the cl
 
 - `Dockerfile` builds from the transferred Python wheelhouse and prebuilt frontend bundle without network access.
 - `kustomization.yaml` applies the existing OpenShift resources with this overlay.
-- `deployment.patch.yaml` switches both containers to registry-hosted images and disables the connected BuildConfig ImageStream trigger.
+- `deployment.patch.yaml` switches both containers to registry-hosted images.
 - `python-wheelhouse/` is populated during connected preparation and is not committed.
 
 No cluster token, registry credential, cookie secret, or signing key belongs in this folder.

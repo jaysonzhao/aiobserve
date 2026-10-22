@@ -3,8 +3,6 @@ kind: Deployment
 metadata:
   name: vllm-metrics-dashboard
   namespace: llm
-  annotations:
-    image.openshift.io/triggers: null
 spec:
   template:
     spec:
