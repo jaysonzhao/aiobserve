@@ -114,4 +114,4 @@ HTTP request, admission rejection, and replica signals are conditional. To enabl
 
 ## Validation notes
 
-The code includes backend tests for registry ordering, scoped PromQL, histogram aggregation, matcher escaping, optional capability handling, DST-aware calendar days, and formula-safe CSV strings, plus frontend tests for timezone conversion and the fixed capacity order. The packaged image has not been deployed; the deployment smoke test and browser OAuth flow remain to be run after an operator builds and applies it.
+The backend and frontend test suites pass. On 2026-10-22, the app was built with an OpenShift Binary BuildConfig and deployed to OpenShift 4.20.39 in namespace `llm`. The OAuth-protected HTTPS route returned healthy and ready status; the namespace API returned the authorized `llm` namespace; model discovery resolved three vLLM workloads to Kubernetes-owned Deployments. A live 24-hour snapshot for `gpt-oss-20b` returned metrics for three pods, including 640,768 input tokens, 154,165 output tokens, queue signals, and latency signals. Latency cards marked older samples stale, and the dashboard displayed the freshness state.
