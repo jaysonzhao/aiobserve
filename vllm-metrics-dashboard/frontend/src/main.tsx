@@ -412,7 +412,7 @@ function App() {
         </>}
         {tab === "gate-history" && <ScaleGateHistoryPanel gate={snapshot.scale_gate} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} settingsDirty={scaleGatePolicyDirty} />}
         {tab === "gate-guide" && <ScaleGateGuidePage policy={gatePolicy} policyId={snapshot.scale_gate.policy_id} settingsDirty={scaleGatePolicyDirty} />}
-        {tab === "metric-clusters" && <MetricClustersPage gate={snapshot.scale_gate} rangeLabel={rangeLabel} snapshotKey={`${snapshot.snapshot_id}:${snapshot.created_utc}`} stale={dirty || scaleGatePolicyDirty} />}
+        {tab === "metric-clusters" && <MetricClustersPage gate={snapshot.scale_gate} rangeLabel={rangeLabel} snapshotKey={`${snapshot.snapshot_id}:${snapshot.created_utc}`} stale={dirty || scaleGatePolicyDirty} namespace={snapshot.filters.namespace} timezone={snapshot.filters.range.timezone} selectedPod={snapshot.filters.selectors.pod} rangeStart={Date.parse(snapshot.filters.range.start_utc) / 1000} rangeEnd={Date.parse(snapshot.filters.range.end_utc) / 1000} />}
         {tab === "latency" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.latency.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
         {tab === "queues" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.queues.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
         {tab === "traffic" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.traffic.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
