@@ -7,6 +7,7 @@ import { CanvasRenderer } from "echarts/renderers";
 import { DEFAULT_TIMEZONE, localInput, wallTimeToIso } from "./time";
 import { TOP10_IDS } from "./registry";
 import { GatePolicy, GateSnapshot, ScaleGateHistoryPanel, ScaleGatePanel, ScaleGateGuidePage } from "./ScaleGateViews";
+import { MetricClustersPage } from "./MetricClustersPage";
 import "./style.css";
 
 echarts.use([LineChart, DataZoomComponent, GridComponent, LegendComponent, TitleComponent, TooltipComponent, CanvasRenderer]);
@@ -395,7 +396,7 @@ function App() {
       {message && <div className="notice"><span className="notice-icon">i</span><span>{message}</span><button onClick={() => setMessage("")}>×</button></div>}
       {!snapshot ? <section className="empty-state"><div className="empty-icon">▥</div><h2>Capture a metrics snapshot</h2><p>Choose an authorized namespace, review the discovered vLLM workloads, then apply filters to query the monitoring data.</p><div className="empty-points"><span>✓ Read-only PromQL</span><span>✓ Missing data stays explicit</span><span>✓ Exportable snapshot</span></div></section> : <>
         <section className="snapshot-bar"><div className="snapshot-title"><span className="snapshot-check">✓</span><div><b>{dirty ? "Showing previous snapshot" : "Snapshot ready"}</b><span>{snapshot.filters.namespace} · {snapshot.filters.range.start_local} — {snapshot.filters.range.end_local} ({snapshot.filters.range.timezone}) · {snapshot.filters.models.map((model) => `${model.model_name} / ${model.deployment}`).join(", ") || "No resolved workloads"}</span>{dirty && <span className="dirty-note">Filter inputs changed. Charts and exports remain on this captured selection until Apply.</span>}</div></div><div className="snapshot-right"><span>{paused ? "Refresh paused" : `Updated ${lastUpdated}`}</span><button className="button button-quiet" onClick={refreshNow} disabled={busy}>↻ Refresh</button><button className="button button-quiet" onClick={() => void downloadExport("csv")}>↓ Export</button></div></section>
-        <nav className="tabs" aria-label="Dashboard sections">{[["overview", "Capacity overview"], ["gate-history", "Scale gate history"], ["gate-guide", "Scale gate guide"], ["latency", "Latency"], ["queues", "Queues & KV"], ["traffic", "Traffic & shape"], ["reliability", "Reliability & replicas"], ["daily", "Daily tokens"], ["catalog", "Metric catalog (" + catalog.length + ")"]].map(([id, label]) => <button key={id} disabled={busy} className={tab === id ? "tab active" : "tab"} onClick={() => selectSection(id)}>{label}</button>)}</nav>
+        <nav className="tabs" aria-label="Dashboard sections">{[["overview", "Capacity overview"], ["gate-history", "Scale gate history"], ["gate-guide", "Scale gate guide"], ["metric-clusters", "Metric clusters"], ["latency", "Latency"], ["queues", "Queues & KV"], ["traffic", "Traffic & shape"], ["reliability", "Reliability & replicas"], ["daily", "Daily tokens"], ["catalog", "Metric catalog (" + catalog.length + ")"]].map(([id, label]) => <button key={id} disabled={busy} className={tab === id ? "tab active" : "tab"} onClick={() => selectSection(id)}>{label}</button>)}</nav>
         {tab === "overview" && <>
           <div className="section-title"><div><h2>Top capacity signals</h2><p>Ten signals selected for model capacity and latency review.</p></div><span className="data-note">{snapshot.filters.range.step_seconds}s query step · {snapshot.filters.range.scope} scope</span></div>
           <ScaleGatePanel gate={snapshot.scale_gate} policy={gatePolicy} onPolicyChange={setGatePolicy} settingsDirty={scaleGatePolicyDirty} onApply={() => void runQuery()} timezone={snapshot.filters.range.timezone} />
@@ -411,6 +412,7 @@ function App() {
         </>}
         {tab === "gate-history" && <ScaleGateHistoryPanel gate={snapshot.scale_gate} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} settingsDirty={scaleGatePolicyDirty} />}
         {tab === "gate-guide" && <ScaleGateGuidePage policy={gatePolicy} policyId={snapshot.scale_gate.policy_id} settingsDirty={scaleGatePolicyDirty} />}
+        {tab === "metric-clusters" && <MetricClustersPage gate={snapshot.scale_gate} rangeLabel={rangeLabel} snapshotKey={`${snapshot.snapshot_id}:${snapshot.created_utc}`} stale={dirty || scaleGatePolicyDirty} />}
         {tab === "latency" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.latency.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
         {tab === "queues" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.queues.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
         {tab === "traffic" && <MetricSection metrics={allMetrics.filter((metric) => SECTION_METRIC_IDS.traffic.includes(metric.id))} timezone={snapshot.filters.range.timezone} rangeLabel={rangeLabel} />}
